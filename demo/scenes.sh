@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # demo/scenes.sh — runs the four demo scenes against a deployed RefutationMarket.
-# Participants run concurrently; on-chain state, read with cast, drives the captions.
+# Six roles: buyer, seller, rogue, newcomer, quiet and arbiter. The sweep runs on the deployer wallet.
+# Participants run concurrently; on-chain state, read with cast, drives the captions, and every count a
+# caption quotes is read from rep(address) at that moment, never written into this file.
 # Captions go to demo/scene.txt (record.mjs overlays them) and demo/timeline.json (cut.sh compresses the waits).
 # Usage: MARKET_ADDRESS=0x… CHAIN=anvil|base-sepolia demo/scenes.sh   (both default from docs/deployment.json)
 set -euo pipefail
@@ -26,20 +28,26 @@ fi
 export MARKET_ADDRESS CHAIN RPC_URL
 
 SALE_SIG='getSale(uint256)((uint256,address,bytes32,uint256,bytes,uint64,uint64,uint64,uint256,bytes,uint64,bytes32,bytes32,uint8,uint8))'
+REP_SIG='rep(address)(uint32,uint32,uint32,uint32,uint32,uint32,uint32,uint32)'
+CLAIM_SIG='getClaim(uint256)((address,string,string,bytes32,uint256,uint32,uint32,uint32,uint64,bool))'
 # SaleState indices, from the contract enum.
-ST_REVEALED=1; ST_CONFIRMED=2; ST_DISPUTED=3; ST_REFUTED=4; ST_UNADJUDICATED=6
-# Sale tuple indices.
-F_DISCLOSED_AT=10; F_REASON=13; F_STATE=14
-# DisputeReason indices.
-R_CANNOT_DECRYPT=0; R_NOT_REPRODUCED=2
+ST_CONFIRMED=2; ST_DISPUTED=3; ST_REFUTED=4; ST_UNADJUDICATED=6
+# Sale tuple indices. The timestamps are persistent; the state is not, so waits key on timestamps where one exists.
+F_SELLER=1; F_REVEALED_AT=6; F_DISPUTED_AT=7; F_DISCLOSED_AT=10; F_REASON=13; F_STATE=14
 
 PIDS=()
+# kill_tree <pid>: the leaves first, then the process; every pid here descends from one this script started.
+kill_tree() {
+  local p="$1" c
+  for c in $(pgrep -P "$p" 2>/dev/null || true); do kill_tree "$c"; done
+  kill "$p" 2>/dev/null || true
+}
 cleanup() {
   local rc=$?
+  trap - EXIT
   echo END > "$SCENE"
-  for p in "${PIDS[@]:-}"; do [ -n "$p" ] && { pkill -P "$p" 2>/dev/null || true; kill "$p" 2>/dev/null || true; }; done
-  # npm wraps node; make sure no agent outlives the script.
-  pkill -f -- '--env-file=../.env src/(buyer|seller|arbiter|sweep).ts' 2>/dev/null || true
+  for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill_tree "$p"; done
+  wait 2>/dev/null || true
   exit "$rc"
 }
 trap cleanup EXIT
@@ -70,25 +78,55 @@ sale_field() { # <saleId> <tupleIndex>
 }
 sale_state() { sale_field "$1" "$F_STATE"; }
 sale_reason() { sale_field "$1" "$F_REASON"; }
+sale_seller() { sale_field "$1" "$F_SELLER"; }
+claim_buyer() { ccall "$CLAIM_SIG" "$1" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0][0])'; }
+state_name() { case "$1" in 0) echo Committed ;; 1) echo Revealed ;; 2) echo Confirmed ;; 3) echo Disputed ;; 4) echo Refuted ;; 5) echo Upheld ;; 6) echo Unadjudicated ;; 7) echo Withdrawn ;; 8) echo Unarbitrated ;; *) echo "state $1" ;; esac; }
+reason_name() { case "$1" in 0) echo "cannot decrypt" ;; 1) echo "commit mismatch" ;; 2) echo "not reproduced" ;; *) echo "reason $1" ;; esac; }
+# sale_status <saleId>: one line for a failure message; survives a sale that cannot be read.
+sale_status() {
+  local id="$1" st r
+  if st="$(sale_state "$id" 2>/dev/null)" && r="$(sale_reason "$id" 2>/dev/null)"; then
+    echo "state $(state_name "$st") ($st), reason $(reason_name "$r"), revealedAt $(sale_field "$id" "$F_REVEALED_AT"), disputedAt $(sale_field "$id" "$F_DISPUTED_AT"), disclosedAt $(sale_field "$id" "$F_DISCLOSED_AT")"
+  else
+    echo "sale #$id cannot be read (saleCount $(sale_count 2>/dev/null || echo '?'))"
+  fi
+}
+# rep_all <address>: the eight rep() counters on one line:
+#   sellerConfirmed sellerRefuted sellerUnadjudicated sellerWithdrawn sellerUnarbitrated buyerAdjudicated buyerSilent buyerDisputesLost
+rep_all() { ccall "$REP_SIG" "$1" --json | python3 -c 'import json,sys; print(" ".join(str(int(x)) for x in json.load(sys.stdin)))'; }
+seller_confirmed() { rep_all "$1" | awk '{print $1}'; }
+seller_unadjudicated() { rep_all "$1" | awk '{print $3}'; }
+buyer_silent() { rep_all "$1" | awk '{print $7}'; }
+# headline_for <address>: the settlement headline the page derives from rep(address), rule for rule.
+headline_for() {
+  local c r u w n rest
+  read -r c r u w n rest <<< "$(rep_all "$1")"
+  if [ "$c" -gt 0 ]; then echo "$c confirmed"
+  elif [ "$r" -gt 0 ]; then echo "refuted history"
+  elif [ "$w" -gt 0 ]; then echo "withdrawn history"
+  elif [ "$n" -gt 0 ]; then echo "unarbitrated history"
+  elif [ "$u" -gt 0 ]; then echo "unverified"
+  else echo "no history"; fi
+}
 
-# wait_state <saleId> <state> <timeoutSeconds>
-wait_state() {
-  local id="$1" want="$2" limit="$3" start=$SECONDS st
-  while :; do
-    st="$(sale_state "$id")"
-    [ "$st" = "$want" ] && return 0
-    [ $((SECONDS - start)) -ge "$limit" ] && die "sale #$id is in state $st, wanted $want after ${limit}s"
+# ---------- waits: every one times out, and a timeout prints the sale's state and reason before failing ----------
+# wait_for <saleId> <timeoutSeconds> <what> <test…>: polls <test…> every 2 s until it passes.
+wait_for() {
+  local id="$1" limit="$2" what="$3" start=$SECONDS; shift 3
+  until "$@"; do
+    [ $((SECONDS - start)) -ge "$limit" ] && die "sale #$id: $what not reached in ${limit}s; $(sale_status "$id")"
     sleep 2
   done
 }
-# wait_disclosed <saleId> <timeoutSeconds>
-wait_disclosed() {
-  local id="$1" limit="$2" start=$SECONDS
-  while [ "$(sale_field "$id" "$F_DISCLOSED_AT")" = "0" ]; do
-    [ $((SECONDS - start)) -ge "$limit" ] && die "sale #$id was never disclosed within ${limit}s"
-    sleep 2
-  done
-}
+is_state() { [ "$(sale_state "$1")" = "$2" ]; }
+is_set() { [ "$(sale_field "$1" "$2")" != "0" ]; }
+# A dispute is on record once disputedAt is set, or once the state has moved past Revealed into a disputed
+# or settled state; the transient Disputed state itself is never required, since the arbiter may rule fast.
+is_disputed() { [ "$(sale_field "$1" "$F_DISPUTED_AT")" != "0" ] || [ "$(sale_state "$1")" -ge "$ST_DISPUTED" ]; }
+wait_state() { wait_for "$1" "$3" "state $(state_name "$2")" is_state "$1" "$2"; }           # terminal states only
+wait_revealed() { wait_for "$1" "$2" "reveal (revealedAt set)" is_set "$1" "$F_REVEALED_AT"; }
+wait_disputed() { wait_for "$1" "$2" "dispute (disputedAt set or state past Revealed)" is_disputed "$1"; }
+wait_disclosed() { wait_for "$1" "$2" "disclosure (disclosedAt set)" is_set "$1" "$F_DISCLOSED_AT"; }
 # wait_new_sale <countBefore> <role> <timeoutSeconds> -> prints the sale id.
 # The id comes from the seller's own receipt (its "committed" log line); saleCount is only the trigger.
 wait_new_sale() {
@@ -96,7 +134,7 @@ wait_new_sale() {
   while :; do
     n="$(sale_count)"
     [ "$n" -gt "$before" ] && break
-    [ $((SECONDS - start)) -ge "$limit" ] && die "$role made no sale within ${limit}s"
+    [ $((SECONDS - start)) -ge "$limit" ] && die "$role made no sale within ${limit}s; saleCount still $n, last log line: $(tail -1 "$LOGS/$role.log" 2>/dev/null || echo none)"
     sleep 2
   done
   id="$(python3 - "$LOGS/$role.log" "$before" <<'PY'
@@ -116,7 +154,6 @@ PY
   [ -n "$id" ] || id=$((n - 1))
   echo "$id"
 }
-reason_name() { case "$1" in 0) echo "cannot decrypt" ;; 1) echo "commit mismatch" ;; 2) echo "not reproduced" ;; *) echo "reason $1" ;; esac; }
 
 # ---------- participants ----------
 run_bg() { # <name> <npm args…>: background agent, stdout to logs/<name>.out (the JSON log goes to logs/<role>.log by itself)
@@ -140,9 +177,9 @@ log "market $MARKET_ADDRESS on $CHAIN via $RPC_URL · adjudication window ${ADJ_
 
 run_bg arbiter arbiter -- watch --seconds 900
 run_bg sweep sweep -- --seconds 900
-caption 0 "Black Box Bazaar on $CHAIN. The arbiter and the sweeper are watching the market."
+caption 0 "Black Box Bazaar on $CHAIN. The arbiter is watching the market and the sweep runs on the deployer wallet."
 
-# Scene 1 — honest sale
+# Scene 1 — honest sale, on the seller wallet
 CLAIM_A="$(post_claim)"; [ -n "$CLAIM_A" ] || die "no CLAIM_ID from buyer post"
 caption 1 "Scene 1 · Claim #$CLAIM_A posted: the buyer escrowed bounties for counterexamples to its claim about the pinned model."
 run_bg buyer buyer -- watch --claim "$CLAIM_A" --seconds 900
@@ -150,48 +187,51 @@ N0="$(sale_count)"
 run_bg seller seller -- hunt --claim "$CLAIM_A" --max 1 --role seller --seconds 600
 caption 1 "Scene 1 · The seller is probing the model for a pair it multiplies wrong. Nothing is on-chain yet."
 S1="$(wait_new_sale "$N0" seller 420)"
+SELLER_ADDR="$(sale_seller "$S1")"
 caption 1 "Scene 1 · Sale #$S1: the seller committed a hash of its counterexample and posted a bond."
-wait_state "$S1" "$ST_REVEALED" 120
+wait_revealed "$S1" 120
 caption 1 "Scene 1 · Sale #$S1 revealed, encrypted to the buyer's key. The buyer decrypts, checks the commit and re-runs the test."
 wait_state "$S1" "$ST_CONFIRMED" 240
-caption 1 "Scene 1 · Sale #$S1 confirmed: the buyer reproduced the failure. Seller paid and now reads 1 confirmed."
+caption 1 "Scene 1 · Sale #$S1 confirmed: the buyer reproduced the failure. The seller is paid and its card reads $(headline_for "$SELLER_ADDR"): $(seller_confirmed "$SELLER_ADDR") confirmed, $(seller_unadjudicated "$SELLER_ADDR") unadjudicated."
 
-# Scene 2 — planted pair
+# Scene 2 — planted pair, on the rogue wallet
 N0="$(sale_count)"
 run_bg rogue seller -- hunt --claim "$CLAIM_A" --max 1 --role rogue --attack plant --seconds 600
 caption 2 "Scene 2 · A rogue wallet plants a pair the model gets right and sells it as a counterexample."
 S2="$(wait_new_sale "$N0" rogue 420)"
-wait_state "$S2" "$ST_REVEALED" 120
+wait_revealed "$S2" 120
 caption 2 "Scene 2 · Sale #$S2 revealed. The buyer re-runs the test on the planted pair."
-wait_state "$S2" "$ST_DISPUTED" 240
+wait_disputed "$S2" 240
 caption 2 "Scene 2 · Buyer disputed sale #$S2 with a bond: $(reason_name "$(sale_reason "$S2")"). The seller must disclose on-chain."
 wait_disclosed "$S2" 120
 caption 2 "Scene 2 · Disclosed. The pair is public now; the arbiter re-runs it five times."
 wait_state "$S2" "$ST_REFUTED" 240
-caption 2 "Scene 2 · Refuted: the model was right. The rogue's bond goes to the buyer, the buyer's bond comes back, and the record says refuted."
+caption 2 "Scene 2 · Refuted: the model was right. The rogue's bond goes to the buyer, the buyer's bond comes back, and the rogue wallet reads $(headline_for "$(sale_seller "$S2")")."
 
-# Scene 3 — garbage reveal by a newcomer
+# Scene 3 — garbage reveal, on the newcomer wallet
 N0="$(sale_count)"
 run_bg newcomer seller -- hunt --claim "$CLAIM_A" --max 1 --role newcomer --attack garbage --seconds 600
 caption 3 "Scene 3 · A newcomer wallet commits a real counterexample but reveals garbage ciphertext."
 S3="$(wait_new_sale "$N0" newcomer 420)"
-wait_state "$S3" "$ST_REVEALED" 120
+wait_revealed "$S3" 120
 caption 3 "Scene 3 · Sale #$S3 revealed. The buyer tries to decrypt it."
-wait_state "$S3" "$ST_DISPUTED" 240
+wait_disputed "$S3" 240
 caption 3 "Scene 3 · Buyer disputed sale #$S3: $(reason_name "$(sale_reason "$S3")"). The seller discloses the real pair and its ephemeral secret."
 wait_disclosed "$S3" 120
 caption 3 "Scene 3 · Disclosed. The arbiter checks delivery before the model: does the secret reproduce the posted ciphertext?"
 wait_state "$S3" "$ST_REFUTED" 240
 caption 3 "Scene 3 · Refuted: the arbiter checked delivery before the model. A real pair, never delivered, earns nothing."
 
-# Scene 4 — silent buyer
+# Scene 4 — silent buyer, sold by the quiet wallet, which has no history
 CLAIM_B="$(post_claim)"; [ -n "$CLAIM_B" ] || die "no CLAIM_ID from second buyer post"
 caption 4 "Scene 4 · Claim #$CLAIM_B posted. The buyer process only watches claim #$CLAIM_A; nobody will adjudicate this one."
+C_SELLER_BEFORE="$(seller_confirmed "$SELLER_ADDR")"
 N0="$(sale_count)"
-run_bg seller2 seller -- hunt --claim "$CLAIM_B" --max 1 --role seller --seconds 600
-S4="$(wait_new_sale "$N0" seller 420)"
-wait_state "$S4" "$ST_REVEALED" 120
-caption 4 "Scene 4 · Sale #$S4 revealed on claim #$CLAIM_B by the seller from scene 1. The buyer stays silent."
+run_bg quiet seller -- hunt --claim "$CLAIM_B" --max 1 --role quiet --seconds 600
+S4="$(wait_new_sale "$N0" quiet 420)"
+QUIET_ADDR="$(sale_seller "$S4")"
+wait_revealed "$S4" 120
+caption 4 "Scene 4 · Sale #$S4 revealed on claim #$CLAIM_B by the quiet wallet, which has no history. The buyer stays silent."
 if [ "$CHAIN" = "anvil" ]; then
   cast rpc evm_increaseTime "$((ADJ_WINDOW + 10))" --rpc-url "$RPC_URL" >/dev/null
   cast rpc evm_mine --rpc-url "$RPC_URL" >/dev/null
@@ -200,7 +240,10 @@ else
   caption 4 "Scene 4 · Waiting out the ${ADJ_WINDOW}s adjudication window with no buyer action."
 fi
 wait_state "$S4" "$ST_UNADJUDICATED" $((ADJ_WINDOW + 240))
-caption 4 "Scene 4 · Settled as unadjudicated: the seller is paid, the buyer's silent count rises, and the seller still reads 1 confirmed. The unadjudicated sale did not move its confirmed count. Silence is not evidence."
+C_SELLER_AFTER="$(seller_confirmed "$SELLER_ADDR")"
+[ "$C_SELLER_AFTER" = "$C_SELLER_BEFORE" ] || die "the honest seller's confirmed count moved from $C_SELLER_BEFORE to $C_SELLER_AFTER during a sale it never made"
+BUYER_ADDR="$(claim_buyer "$CLAIM_B")"
+caption 4 "Scene 4 · Settled as unadjudicated: the quiet wallet is paid and the buyer's silent count is $(buyer_silent "$BUYER_ADDR"). The quiet wallet reads $(headline_for "$QUIET_ADDR"), with $(seller_unadjudicated "$QUIET_ADDR") unadjudicated and $(seller_confirmed "$QUIET_ADDR") confirmed. The honest seller still reads $C_SELLER_AFTER confirmed, unchanged. Silence is not evidence."
 sleep 6
 caption end "END"
 log "all four scenes done: sales #$S1 #$S2 #$S3 #$S4"

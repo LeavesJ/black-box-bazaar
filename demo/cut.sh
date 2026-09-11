@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # demo/cut.sh — demo/out/raw.webm + demo/out/record-start.json + demo/timeline.json -> demo/out/bazaar-demo.mp4
+# record-start.json is stamped by record.mjs when the page is created, before it loads, which is when the video starts;
+# timeline.json holds one entry per caption (scenes.sh writes about twenty, and any count from one up works).
 # Every wait longer than GAP seconds between two captions keeps its first KEEP_HEAD s and last KEEP_TAIL s;
 # the middle is replaced by a FREEZE-second still of the last kept frame labelled "… N s pass …".
 # Segments are cut with ffmpeg and joined with the concat demuxer. Fails if the result exceeds LIMIT seconds.
@@ -22,7 +24,9 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 
 duration() { ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$1"; }
 RAW_DUR="$(duration "$RAW")"
-echo "raw: ${RAW_DUR}s"
+N_CAPS="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$TIMELINE")"
+[ "$N_CAPS" -ge 1 ] || { echo "cut.sh: $TIMELINE has no captions" >&2; exit 1; }
+echo "raw: ${RAW_DUR}s · captions: $N_CAPS · start: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["t"])' "$START")"
 
 # ---------- label rendering: drawtext when this ffmpeg has it, else a PNG rendered by chromium and overlaid ----------
 FONTFILE=""
@@ -77,7 +81,7 @@ echo "plan:"; cat "$WORK/plan.txt"
 # ---------- render segments ----------
 LIST="$WORK/list.txt"; : > "$LIST"
 i=0
-while read -r kind a b; do
+while read -r -u 3 kind a b; do   # fd 3: ffmpeg inside the loop reads stdin and would eat plan lines
   i=$((i + 1)); seg="$WORK/seg$(printf '%03d' "$i").mp4"
   case "$kind" in
     cut)
@@ -100,7 +104,7 @@ while read -r kind a b; do
     *) echo "cut.sh: bad plan line: $kind $a $b" >&2; exit 1 ;;
   esac
   printf "file '%s'\n" "$seg" >> "$LIST"
-done < "$WORK/plan.txt"
+done 3< "$WORK/plan.txt"
 
 # ---------- join ----------
 ffmpeg -y -v error -f concat -safe 0 -i "$LIST" "${ENC[@]}" -movflags +faststart "$FINAL"

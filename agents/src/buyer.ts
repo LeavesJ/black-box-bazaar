@@ -1,6 +1,6 @@
 // agents/src/buyer.ts
 import { bytesToHex, parseEther, type Hex } from "viem";
-import { REASON, REASON_NAMES, S, clients, eventFromReceipt, send, sleep, txLink } from "./chain.ts";
+import { REASON, REASON_NAMES, S, type Windows, clients, eventFromReceipt, isTerminal, isTerminalRevert, keepTrying, readWindows, send, sleep, txLink } from "./chain.ts";
 import { BOUNTY_ETH, BUYER_RUNS, BUYER_THRESHOLD, CLAIM_DURATION, HI, LO, MAX_HITS, POLL_MS, SUPPORTED_SPEC, claimIsSupported, keyFor } from "./config.ts";
 import { boxKeypairFromEthKey, commitHash, open, parsePair, splitEnvelope } from "./crypto.ts";
 import { logger } from "./log.ts";
@@ -9,7 +9,6 @@ import { modelIsWrong } from "./model.ts";
 const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(`--${name}`);
 const opt = (name: string, dflt: string) => { const i = args.indexOf(`--${name}`); return i >= 0 && args[i + 1] ? args[i + 1] : dflt; };
-const MAX_ATTEMPTS = 3;
 
 const log = logger("buyer");
 const { account, publicClient, market } = clients("buyer");
@@ -28,34 +27,38 @@ async function post() {
   console.log(`CLAIM_ID=${ev.claimId}`);
 }
 
-async function adjudicate(saleId: bigint, claimId: bigint, ciphertext: Hex, commit: Hex) {
+// ---- the verdict on a reveal, separated from the transaction that acts on it. A verdict is computed
+// once per sale and cached; when the send fails, the retry is the send alone, never the model.
+type Decision = { act: "confirm" } | { act: "dispute"; reason: number };
+
+async function decide(saleId: bigint, claimId: bigint, ciphertext: Hex, commit: Hex): Promise<Decision> {
   const env = open(ciphertext, box.secretKey);
-  if (!env) { log("cannot decrypt the reveal, disputing", { saleId }); return dispute(saleId, claimId, REASON.CannotDecrypt); }
+  if (!env) { log("cannot decrypt the reveal, disputing", { saleId }); return { act: "dispute", reason: REASON.CannotDecrypt }; }
   const { plaintext, salt } = splitEnvelope(env);
   if (commitHash(claimId, bytesToHex(plaintext), salt) !== commit) {
     log("envelope fails the commit check, disputing", { saleId });
-    return dispute(saleId, claimId, REASON.CommitMismatch);
+    return { act: "dispute", reason: REASON.CommitMismatch };
   }
   const pair = parsePair(plaintext);
   if (!pair) {
     log(`plaintext is not a pair of integers in ${LO}..${HI}, disputing`, { saleId, plaintext: bytesToHex(plaintext) });
-    return dispute(saleId, claimId, REASON.NotReproduced);
+    return { act: "dispute", reason: REASON.NotReproduced };
   }
   log("re-running", { saleId, a: pair.a, b: pair.b, runs: BUYER_RUNS });
   const r = await modelIsWrong(pair.a, pair.b, BUYER_RUNS, BUYER_THRESHOLD);
   log("re-run result", { saleId, wrong: r.wrong, malformed: r.malformed, runs: r.runs, truth: r.truth, answers: r.answers });
-  if (r.verdict) {
-    const receipt = await send(publicClient, market.write.confirm([saleId]));
-    log("confirmed", { saleId, tx: txLink(receipt.transactionHash) });
-  } else {
-    await dispute(saleId, claimId, REASON.NotReproduced);
-  }
+  return r.verdict ? { act: "confirm" } : { act: "dispute", reason: REASON.NotReproduced };
 }
 
-async function dispute(saleId: bigint, claimId: bigint, reason: number) {
+async function act(saleId: bigint, claimId: bigint, d: Decision) {
+  if (d.act === "confirm") {
+    const receipt = await send(publicClient, market.write.confirm([saleId]));
+    log("confirmed", { saleId, tx: txLink(receipt.transactionHash) });
+    return;
+  }
   const bond = await market.read.bondFor([claimId]) as bigint;
-  const receipt = await send(publicClient, market.write.dispute([saleId, reason], { value: bond }));
-  log("disputed", { saleId, reason, reasonName: REASON_NAMES[reason], bond, tx: txLink(receipt.transactionHash) });
+  const receipt = await send(publicClient, market.write.dispute([saleId, d.reason], { value: bond }));
+  log("disputed", { saleId, reason: d.reason, reasonName: REASON_NAMES[d.reason], bond, tx: txLink(receipt.transactionHash) });
 }
 
 async function watch() {
@@ -63,9 +66,12 @@ async function watch() {
   const only = opt("claim", "");
   const seconds = Number(opt("seconds", "600"));
   const until = Date.now() + seconds * 1000;
+  // `done` holds every sale this watcher will never read again: terminal, not ours, not this claim,
+  // acted on, or abandoned because its window closed. Only open sales are re-read each poll.
   const done = new Set<string>();
-  const failures = new Map<string, number>();
+  const decisions = new Map<string, Decision>();
   const claims = new Map<string, any>();
+  let windows: Windows | null = null;
   const claimFor = async (id: bigint) => {
     const k = id.toString();
     if (!claims.has(k)) claims.set(k, await market.read.getClaim([id]));
@@ -74,24 +80,32 @@ async function watch() {
   log("watching", { silent, only: only || "all", seconds });
   while (Date.now() < until) {
     try {
+      windows ??= await readWindows(market);
+      const now = (await publicClient.getBlock()).timestamp; // the chain clock, which the contract judges by
       const n = Number(await market.read.saleCount());
       for (let i = 0; i < n; i++) {
         const key = String(i);
-        if (done.has(key) || (failures.get(key) ?? 0) >= MAX_ATTEMPTS) continue;
+        if (done.has(key)) continue;
         const s = await market.read.getSale([BigInt(i)]) as any;
-        if (only && s.claimId.toString() !== only) continue; // --claim N: never act outside that claim
+        if (isTerminal(s.state)) { done.add(key); continue; }
+        if (only && s.claimId.toString() !== only) { done.add(key); continue; } // --claim N: never act outside that claim
         if (s.state !== S.Revealed) continue;
         const c = await claimFor(s.claimId);
-        if (c.buyer.toLowerCase() !== account.address.toLowerCase()) continue;
+        if (c.buyer.toLowerCase() !== account.address.toLowerCase()) { done.add(key); continue; }
         if (!claimIsSupported(c)) { log("unsupported claim, skipping", { saleId: i, claimId: s.claimId }); done.add(key); continue; }
         if (silent) { done.add(key); log("reveal seen, staying silent on purpose", { saleId: i }); continue; }
+        if (!keepTrying(s, now, windows)) {
+          log("adjudication window closed on the chain clock, leaving the sale to the sweep", { saleId: i, revealedAt: s.revealedAt, now });
+          done.add(key); continue;
+        }
         try {
-          await adjudicate(BigInt(i), s.claimId, s.ciphertext, s.commitHash);
+          let d = decisions.get(key);
+          if (!d) { d = await decide(BigInt(i), s.claimId, s.ciphertext, s.commitHash); decisions.set(key, d); }
+          await act(BigInt(i), s.claimId, d);
           done.add(key);
         } catch (e) {
-          const attempt = (failures.get(key) ?? 0) + 1;
-          failures.set(key, attempt);
-          log(attempt >= MAX_ATTEMPTS ? "adjudication failed, giving up on this sale" : "adjudication failed, will retry", { saleId: i, attempt, error: errText(e) });
+          if (isTerminalRevert(e)) { log("chain refused the transition, nothing left to do for this sale", { saleId: i, error: errText(e) }); done.add(key); }
+          else log("adjudication failed, will retry until the window closes", { saleId: i, cachedVerdict: decisions.has(key), error: errText(e) });
         }
       }
     } catch (e) { log("watch poll failed, retrying", { error: errText(e) }); }

@@ -7,10 +7,16 @@ const REASONS = ["cannot decrypt", "commit mismatch", "not reproduced"];
 const CHUNK_START = 2000n;
 const CHUNK_FLOOR = 16n;
 const ACTIVITY_ROWS = 12;
+const REFRESH_MS = 5000;
+// A getLogs error that names the span is the RPC's cap; anything else is transient and retried.
+const RANGE_ERROR = /range|limit|too many|exceed/i;
+const RETRIES = 3;
+const RETRY_MS = 2000;
 
 const $ = (id) => document.getElementById(id);
 const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const dep = await (await fetch("./deployment.json", { cache: "no-store" })).json();
 const abi = await (await fetch("./abi.json", { cache: "no-store" })).json();
@@ -26,30 +32,45 @@ const read = (fn, args = []) => client.readContract({ address: dep.address, abi,
 // ---------- event history ----------
 // Fetched once from the deployment block in chunks, then only the blocks after the last one seen.
 const logs = [];                 // every decoded log, in block order
+const seen = new Set();          // transactionHash:logIndex, so a re-read range never doubles a row
 let lastSeen = BigInt(dep.deployedBlock ?? 0) - 1n;
 let chunk = CHUNK_START;
 const blockTime = new Map();     // blockNumber (string) -> unix seconds
 
 async function fetchRange(from, to) {
   const got = await client.getLogs({ address: dep.address, events: EVENTS, fromBlock: from, toBlock: to });
-  for (const l of got) logs.push(l);
+  for (const l of got) {
+    const key = `${l.transactionHash}:${l.logIndex}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    logs.push(l);
+  }
 }
 
 async function syncLogs() {
   const latest = await client.getBlockNumber();
   let from = lastSeen + 1n;
+  let retries = 0;
   while (from <= latest) {
     const to = from + chunk - 1n > latest ? latest : from + chunk - 1n;
     try {
       await fetchRange(from, to);
       lastSeen = to;
       from = to + 1n;
+      retries = 0;
     } catch (e) {
-      // Public RPCs cap the block span of one getLogs call; halve until it fits, then give up loudly.
-      if (chunk > CHUNK_FLOOR) { chunk = chunk / 2n; continue; }
+      const msg = String(e?.message ?? e);
+      if (RANGE_ERROR.test(msg)) {
+        // Public RPCs cap the block span of one getLogs call; halve until it fits, then give up loudly.
+        if (chunk > CHUNK_FLOOR) { chunk = chunk / 2n; continue; }
+        throw e;
+      }
+      // A dropped connection or a server error: the same range again, a few times, then give up loudly.
+      if (retries < RETRIES) { retries++; await pause(RETRY_MS); continue; }
       throw e;
     }
   }
+  chunk = CHUNK_START;   // a full pass got through; the next one starts wide again
   logs.sort((a, b) => (a.blockNumber === b.blockNumber ? Number(a.logIndex - b.logIndex) : (a.blockNumber < b.blockNumber ? -1 : 1)));
   const missing = [...new Set(logs.map((l) => l.blockNumber.toString()))].filter((n) => !blockTime.has(n));
   await Promise.all(missing.map(async (n) => {
@@ -80,6 +101,8 @@ function describe(l) {
     case "Settled": return `${sale} · buyer silent past the window, paid as unadjudicated`;
     case "Withdrawn": return `${sale} · ${esc(a.reason)}, seller bond to buyer`;
     case "Unarbitrated": return `${sale} · arbiter never ruled, each bond returned`;
+    case "PaymentDeferred": return `${addrLink(a.to)} refused ${formatEther(a.amount)} ETH · credited to owed, withdraw() to collect`;
+    case "Paid": return `${addrLink(a.to)} withdrew ${formatEther(a.amount)} ETH`;
     default: return `${sale} ${claim}`.trim();
   }
 }
@@ -87,35 +110,49 @@ function describe(l) {
 const row = (l) => `<li><span class="ev ${esc(l.eventName)}">${esc(l.eventName)}</span><span>${describe(l)} <span class="when">${when(l)}</span></span><span>${txLink(l.transactionHash)}</span></li>`;
 
 // ---------- state ----------
+let busy = false;   // one load at a time; a tick that lands mid-load is skipped, not queued
 async function load() {
-  await syncLogs();
-  const nClaims = Number(await read("claimCount"));
-  const nSales = Number(await read("saleCount"));
-  const claims = [], sales = [];
-  for (let i = 0; i < nClaims; i++) claims.push({ id: i, ...(await read("getClaim", [BigInt(i)])) });
-  for (let i = 0; i < nSales; i++) sales.push({ id: i, ...(await read("getSale", [BigInt(i)])) });
-  const addrs = new Set([...claims.map(c => c.buyer), ...sales.map(s => s.seller)]);
-  const reps = {};
-  for (const a of addrs) {
-    const r = await read("rep", [a]);
-    reps[a] = { sellerConfirmed: r[0], sellerRefuted: r[1], sellerUnadjudicated: r[2], sellerWithdrawn: r[3], sellerUnarbitrated: r[4],
-                buyerAdjudicated: r[5], buyerSilent: r[6], buyerDisputesLost: r[7] };
+  if (busy) return;
+  busy = true;
+  try {
+    await syncLogs();
+    const nClaims = Number(await read("claimCount"));
+    const nSales = Number(await read("saleCount"));
+    const claims = [], sales = [];
+    for (let i = 0; i < nClaims; i++) claims.push({ id: i, ...(await read("getClaim", [BigInt(i)])) });
+    for (let i = 0; i < nSales; i++) sales.push({ id: i, ...(await read("getSale", [BigInt(i)])) });
+    const addrs = new Set([...claims.map(c => c.buyer), ...sales.map(s => s.seller)]);
+    const reps = {}, owed = {};
+    for (const a of addrs) {
+      const r = await read("rep", [a]);
+      reps[a] = { sellerConfirmed: r[0], sellerRefuted: r[1], sellerUnadjudicated: r[2], sellerWithdrawn: r[3], sellerUnarbitrated: r[4],
+                  buyerAdjudicated: r[5], buyerSilent: r[6], buyerDisputesLost: r[7] };
+      owed[a] = await read("owed", [a]);
+    }
+    render(claims, sales, reps, owed, new Set(claims.map(c => c.buyer)), new Set(sales.map(s => s.seller)));
+  } finally {
+    busy = false;
   }
-  render(claims, sales, reps, new Set(claims.map(c => c.buyer)), new Set(sales.map(s => s.seller)));
 }
 
+// The headline is decided top-down: a confirmation beats every other outcome; below that, the worst
+// adverse outcome names the history; silence alone is "unverified"; nothing settled is "no history".
+// The adverse counts are shown beside the headline whenever any of them is non-zero.
 function sellerHeadline(r) {
-  // Only adjudicated outcomes move the headline. Silence, withdrawal and an absent arbiter are shown, never folded in.
   const adverse = [];
   if (r.sellerRefuted > 0) adverse.push(`${r.sellerRefuted} refuted`);
   if (r.sellerWithdrawn > 0) adverse.push(`${r.sellerWithdrawn} withdrawn`);
   if (r.sellerUnarbitrated > 0) adverse.push(`${r.sellerUnarbitrated} unarbitrated`);
-  if (r.sellerConfirmed > 0) return { text: `${r.sellerConfirmed} confirmed`, cls: "ok", beside: adverse.join(" · ") };
-  if (r.sellerRefuted > 0) return { text: "refuted history", cls: "bad", beside: "" };
-  return { text: "unverified", cls: "unk", beside: "" };
+  const beside = adverse.join(" · ");
+  if (r.sellerConfirmed > 0) return { text: `${r.sellerConfirmed} confirmed`, cls: "ok", beside };
+  if (r.sellerRefuted > 0) return { text: "refuted history", cls: "bad", beside };
+  if (r.sellerWithdrawn > 0) return { text: "withdrawn history", cls: "bad", beside };
+  if (r.sellerUnarbitrated > 0) return { text: "unarbitrated history", cls: "warn", beside };
+  if (r.sellerUnadjudicated > 0) return { text: "unverified", cls: "unk", beside };
+  return { text: "no history", cls: "unk", beside };
 }
 
-function render(claims, sales, reps, buyers, sellers) {
+function render(claims, sales, reps, owed, buyers, sellers) {
   const postedTx = {};
   for (const l of logs) if (l.eventName === "ClaimPosted") postedTx[l.args.claimId.toString()] = l.transactionHash;
 
@@ -131,7 +168,7 @@ function render(claims, sales, reps, buyers, sellers) {
 
   $("sales").innerHTML = sales.slice().reverse().map(s => {
     const st = STATES[s.state] ?? `state ${s.state}`;
-    const pt = s.plaintext && s.plaintext !== "0x" ? new TextDecoder().decode(hexToBytes(s.plaintext)) : null;
+    const pt = s.disclosedAt > 0n && s.plaintext && s.plaintext !== "0x" ? new TextDecoder().decode(hexToBytes(s.plaintext)) : null;
     const disputed = s.disputedAt > 0n;
     const mine = logs.filter((l) => l.args?.saleId !== undefined && l.args.saleId === BigInt(s.id));
     return `
@@ -150,6 +187,7 @@ function render(claims, sales, reps, buyers, sellers) {
     const isSeller = sellers.has(a) || r.sellerConfirmed + r.sellerRefuted + r.sellerUnadjudicated + r.sellerWithdrawn + r.sellerUnarbitrated > 0;
     const isBuyer = buyers.has(a) || r.buyerAdjudicated + r.buyerSilent > 0;
     const h = sellerHeadline(r);
+    const due = owed[a] ?? 0n;
     return `
     <div class="card" data-addr="${a}">
       <div class="row">${addrLink(a)}<span class="muted">${isSeller ? "seller" : ""}${isSeller && isBuyer ? " · " : ""}${isBuyer ? "buyer" : ""}</span></div>
@@ -157,13 +195,14 @@ function render(claims, sales, reps, buyers, sellers) {
       <div class="triple"><div><b>${r.sellerConfirmed}</b>confirmed</div><div><b>${r.sellerRefuted}</b>refuted</div><div><b>${r.sellerUnadjudicated}</b>unadjudicated</div></div>
       <div class="small"><div><b>${r.sellerWithdrawn}</b>withdrawn <span class="dim">(never revealed or never disclosed)</span></div><div><b>${r.sellerUnarbitrated}</b>unarbitrated <span class="dim">(arbiter never ruled)</span></div></div>` : ""}
       ${isBuyer ? `<div class="triple" style="margin-top:8px"><div><b>${r.buyerAdjudicated}</b>adjudicated</div><div><b>${r.buyerSilent}</b>silent</div><div><b>${r.buyerDisputesLost}</b>disputes lost</div></div>` : ""}
+      ${due > 0n ? `<div class="owed">${formatEther(due)} ETH deferred, withdraw() to collect</div>` : ""}
     </div>`;
   }).join("") || `<div class="muted">Nobody yet.</div>`;
 
-  $("foot").textContent = `Refreshed ${new Date().toLocaleTimeString()} · ${logs.length} events through block ${lastSeen}. A seller reads "unverified" until a sale is confirmed or refuted; sales paid in silence never count as confirmed.`;
+  $("foot").textContent = `Refreshed ${new Date().toLocaleTimeString()} · ${logs.length} events through block ${lastSeen}. A seller reads "unverified" while its only settled sales are unadjudicated; sales paid in silence never count as confirmed.`;
 }
 
 function hexToBytes(hex) { const h = hex.slice(2); const out = new Uint8Array(h.length / 2); for (let i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16); return out; }
 
 try { await load(); } catch (e) { $("foot").textContent = "load failed: " + e.message; }
-setInterval(() => load().catch(e => { $("foot").textContent = "refresh failed: " + e.message; }), 5000);
+setInterval(() => load().catch(e => { $("foot").textContent = "refresh failed: " + e.message; }), REFRESH_MS);

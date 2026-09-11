@@ -1,7 +1,7 @@
 // agents/test/model.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyReply, modelIsWrong, parseInteger, type Ask } from "../src/model.ts";
+import { CLIENT_OPTIONS, classifyReply, modelIsWrong, parseInteger, type Ask } from "../src/model.ts";
 
 test("classifyReply accepts a bare integer, with thousands commas, one trailing period, whitespace, or a sign", () => {
   assert.deepEqual(classifyReply("517430"), { kind: "answer", value: 517430n });
@@ -60,4 +60,19 @@ test("modelIsWrong: two well-formed wrong answers of three meet the buyer thresh
   assert.equal(r.wrong, 2);
   assert.equal(r.malformed, 0);
   assert.equal(r.verdict, true);
+});
+
+test("the Anthropic client is built with a 20 s timeout and two SDK retries", () => {
+  assert.deepEqual({ ...CLIENT_OPTIONS }, { timeout: 20000, maxRetries: 2 });
+});
+
+test("modelIsWrong: a timeout or API error throws and never counts as malformed", async () => {
+  let calls = 0;
+  const flaky: Ask = async () => { calls++; if (calls === 2) throw new Error("Request timed out."); return { text: "517431", stopReason: "end_turn" }; };
+  await assert.rejects(modelIsWrong(590, 877, 3, 2, flaky), (e: any) => {
+    assert.match(e.message, /model call failed on run 2 of 3: Request timed out\./);
+    assert.equal(e.cause?.message, "Request timed out.");
+    return true;
+  });
+  assert.equal(calls, 2, "the run stops at the failure; nothing after it is asked");
 });

@@ -2,8 +2,13 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { MAX_TOKENS, MODEL_ID, PROMPT } from "./config.ts";
 
+/// One request may wait 20 s and be retried twice by the SDK; after that the call throws. The
+/// agents' own retry is bounded by the sale's on-chain window, never by a fixed strike count, so a
+/// slow API stalls an adjudication for at most the window, never for a whole poll loop.
+export const CLIENT_OPTIONS = { timeout: 20_000, maxRetries: 2 } as const;
+
 let client: Anthropic | null = null;
-function api() { return (client ??= new Anthropic()); }
+function api() { return (client ??= new Anthropic(CLIENT_OPTIONS)); }
 
 export type Reply = { kind: "answer"; value: bigint } | { kind: "malformed"; why: string };
 
@@ -41,13 +46,17 @@ export type Verdict = { wrong: number; malformed: number; runs: number; verdict:
 
 /// Runs the test `runs` times. Only a well-formed integer different from a*b counts as wrong;
 /// malformed replies are counted beside it and never toward the threshold. `ask` is injectable so
-/// the counting rule can be tested without the model.
+/// the counting rule can be tested without the model. A timeout or API error is neither: it
+/// propagates as a thrown error, so the caller's window-bounded retry runs the whole verdict again
+/// and a dead API never reads as a model that answered badly.
 export async function modelIsWrong(a: number, b: number, runs: number, threshold: number, ask: Ask = askProduct): Promise<Verdict> {
   const truth = BigInt(a) * BigInt(b);
   const answers: string[] = [];
   let wrong = 0, malformed = 0;
   for (let i = 0; i < runs; i++) {
-    const { text, stopReason } = await ask(a, b);
+    let text: string, stopReason: string | null;
+    try { ({ text, stopReason } = await ask(a, b)); }
+    catch (e) { throw new Error(`model call failed on run ${i + 1} of ${runs}: ${e instanceof Error ? e.message : String(e)}`, { cause: e }); }
     const r = classifyReply(text, stopReason);
     answers.push(r.kind === "answer" ? text.trim() : `[malformed: ${r.why}] ${text.trim()}`);
     if (r.kind === "malformed") malformed++;

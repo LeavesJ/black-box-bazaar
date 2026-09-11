@@ -254,7 +254,8 @@ backend.
 ## Amendments after external review, 2026-09-10
 
 An external review of the built system found six things the sections above
-either missed or got wrong. Each is listed with the change made, by layer.
+either missed or got wrong, and a second pass found a seventh. Each is listed
+with the change made, by layer.
 Earlier sections stand as written; where they disagree with this section,
 this section wins.
 
@@ -265,9 +266,13 @@ this section wins.
    in `Disclosed`. Agents: the seller keeps its per-sale ephemeral secret and
    discloses it; the arbiter rebuilds the box against the claim's buyer key
    and compares it with the posted ciphertext before running the model, and a
-   mismatch refutes the seller. This is a trusted-arbiter check, not on-chain
-   cryptography; the contract stores the secret but cannot verify a box. Page:
-   the dispute reason is shown beside the sale.
+   mismatch refutes the seller. The check is spec-independent: it reads only
+   the disclosed material and the claim's key, so the arbiter applies it to
+   every dispute before anything else, and model evaluation happens only
+   afterwards and only for the one supported specification (amendment 3).
+   This is a trusted-arbiter check, not on-chain cryptography; the contract
+   stores the secret but cannot verify a box. Page: the dispute reason is
+   shown beside the sale.
 
 2. **Arbiter silence locked funds after disclosure.** Once a seller disclosed,
    the only exit was `rule`, and nothing happened if the arbiter never called
@@ -297,11 +302,16 @@ this section wins.
    refutations "unknown".** Section 7's rule read "unknown" whenever confirmed
    was zero, so a seller refuted ten times looked like a newcomer, and the
    "refuted" number silently included withdrawn sales. Page: the section is now
-   "Settlement history". Only unadjudicated history reads "unverified";
-   refutations with no confirmations read "refuted history"; confirmations
-   read "N confirmed" with the adverse outcomes beside it; withdrawn and
-   unarbitrated are shown as their own counts. A note states that
-   address-level history can be self-dealt.
+   "Settlement history" and the headline is decided top-down, first matching
+   row wins: confirmed > 0 reads "N confirmed" with the adverse counts beside
+   it; confirmed = 0 and refuted > 0 reads "refuted history"; confirmed and
+   refuted both 0 and withdrawn > 0 reads "withdrawn history"; confirmed,
+   refuted and withdrawn all 0 and unarbitrated > 0 reads "unarbitrated
+   history"; only unadjudicated reads "unverified"; nothing settled reads "no
+   history". The adverse row (refuted, withdrawn, unarbitrated) is rendered
+   whenever any of those counts is non-zero, whatever the headline, and
+   withdrawn and unarbitrated are never folded into refuted. A note states
+   that address-level history can be self-dealt.
 
 5. **Lifecycle bugs in the agents.** The seller took its sale id from
    `saleCount() - 1`, which is wrong the moment two sellers commit in the same
@@ -323,6 +333,18 @@ this section wins.
    per sale, with a transaction link for each step. The synthetic narration
    variant is dropped.
 
+7. **A recipient could revert its own settlement.** Every terminal
+   transition paid by push, so a contract address that rejected ether could
+   make `confirm`, `rule`, `settle` or `withdrawSale` revert and hold the sale
+   open. Contract: `_pay` pushes with a 50000 gas stipend; a refused payment
+   is credited to `owed(address)` and emits `PaymentDeferred(to, amount)`,
+   and the transition completes regardless. `withdraw()` pays the credit out
+   and emits `Paid(to, amount)`. No transition can be reverted by its
+   recipient. In the same pass the disclosure sentinel became `disclosedAt !=
+   0` rather than the plaintext length, and `disclose` rejects an empty
+   plaintext. Page: a non-zero `owed` balance is shown on the address's
+   settlement card as "N ETH deferred, withdraw() to collect".
+
 ### Still not caught
 
 - A dishonest single arbiter.
@@ -331,3 +353,8 @@ this section wins.
   section 4 is designed, not built.
 - Self-dealing addresses: one party behind both buyer and seller, buying its
   own confirmations.
+- A seller that commits to an empty or junk preimage and never discloses. It
+  forfeits its bond, which is the designed outcome, but the slot it reserved
+  is held until the window closes.
+- Delivery itself. Nothing on-chain proves the buyer could open the reveal;
+  only the arbiter's reconstruction from the disclosed secret says so.

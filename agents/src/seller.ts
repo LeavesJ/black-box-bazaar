@@ -3,7 +3,8 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bytesToHex, hexToBytes, type Hex } from "viem";
-import { REASON_NAMES, S, STATE_NAMES, clients, committedSaleIdFromReceipt, isTerminal, send, sleep, txLink } from "./chain.ts";
+import abi from "./abi.json" with { type: "json" };
+import { REASON_NAMES, S, STATE_NAMES, clients, committedSaleIdFromReceipt, isDisclosed, isTerminal, saleIdFromCommittedLogs, send, sleep, txLink } from "./chain.ts";
 import { BUYER_RUNS, BUYER_THRESHOLD, CHAIN, HI, LO, MARKET_ADDRESS, POLL_MS, ROLES, claimIsSupported, type Role } from "./config.ts";
 import { canonicalPair, commitHash, envelope, randomBytesHex, randomSalt, seal, stringToBytes } from "./crypto.ts";
 import { logger } from "./log.ts";
@@ -13,7 +14,7 @@ const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(`--${name}`);
 const opt = (name: string, dflt: string) => { const i = args.indexOf(`--${name}`); return i >= 0 && args[i + 1] ? args[i + 1] : dflt; };
 const usage = () => {
-  console.error("usage: seller.ts hunt --claim N [--max K] [--role seller|rogue|newcomer] [--attack plant|garbage] [--rogue] [--budget B] [--seconds S]");
+  console.error("usage: seller.ts hunt --claim N [--max K] [--role seller|rogue|newcomer|quiet] [--attack plant|garbage] [--rogue] [--budget B] [--seconds S]");
   process.exit(2);
 };
 
@@ -26,12 +27,20 @@ const role = opt("role", attack === "none" ? "seller" : "rogue") as Role;
 if (args[0] !== "hunt" || !ATTACKS.includes(attack) || !ROLES.includes(role)) usage();
 
 const log = logger(role);
-const { publicClient, market } = clients(role);
+const { account, publicClient, market } = clients(role);
 const rnd = () => LO + Math.floor(Math.random() * (HI - LO + 1));
+const errText = (e: unknown) => String(e instanceof Error ? e.message : e).slice(0, 200);
 
-// ---- private per-sale material, persisted before reveal so a restarted seller can still reveal
-// and disclose. One file per role under agents/.state (gitignored), keyed by deployment.
-type Material = { claimId: string; plaintext: Hex; salt: Hex; ephemeralSecret: Hex; ciphertext: Hex; attack: Attack };
+// ---- private per-sale material, keyed by commit hash and persisted BEFORE the commit is sent, so a
+// crash between the send and the receipt never leaves a bond on chain with nothing to reveal. The
+// receipt attaches the sale id; a lost receipt is recovered from the Committed log by the hash.
+// One file per role under agents/.state (gitignored), namespaced by deployment.
+type Material = {
+  claimId: string; commitHash: Hex; plaintext: Hex; salt: Hex; ephemeralSecret: Hex; ciphertext: Hex; attack: Attack;
+  sinceBlock?: string; // the block just before the commit was sent; bounds the log search
+  sinceAt?: string;    // that block's timestamp; a commit unseen past sinceAt + revealWindow is worthless
+  saleId?: string;     // attached from the receipt, or recovered from the log
+};
 const here = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = join(here, "..", ".state");
 const STATE_FILE = join(STATE_DIR, `${role}.json`);
@@ -40,7 +49,18 @@ const NS = `${CHAIN.id}:${MARKET_ADDRESS.toLowerCase()}`;
 function loadAll(): Record<string, Record<string, Material>> {
   try { return JSON.parse(readFileSync(STATE_FILE, "utf8")); } catch { return {}; }
 }
-const mine: Record<string, Material> = loadAll()[NS] ?? {};
+/// Entries written before material was keyed by commit hash were keyed by sale id and carried no
+/// hash; both are derivable, so an older file is read in place rather than migrated by hand.
+function loadMine(): Record<string, Material> {
+  const out: Record<string, Material> = {};
+  for (const [k, m] of Object.entries(loadAll()[NS] ?? {})) {
+    const hash = m.commitHash ?? commitHash(BigInt(m.claimId), m.plaintext, m.salt);
+    const saleId = m.saleId ?? (/^\d+$/.test(k) ? k : undefined);
+    out[hash] = { ...m, commitHash: hash, ...(saleId !== undefined ? { saleId } : {}) };
+  }
+  return out;
+}
+const mine: Record<string, Material> = loadMine();
 function persist() {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   const all = loadAll();
@@ -48,6 +68,17 @@ function persist() {
   const tmp = `${STATE_FILE}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(all, null, 2) + "\n", { mode: 0o600 });
   renameSync(tmp, STATE_FILE);
+}
+
+/// The sale id for a commitment whose receipt never arrived: this seller's Committed logs on this
+/// claim, from the block just before the send, matched on the hash.
+async function recoverSaleId(m: Material): Promise<bigint | null> {
+  const logs = await publicClient.getContractEvents({
+    address: MARKET_ADDRESS, abi, eventName: "Committed",
+    args: { claimId: BigInt(m.claimId), seller: account.address },
+    fromBlock: m.sinceBlock ? BigInt(m.sinceBlock) : 0n, toBlock: "latest",
+  });
+  return saleIdFromCommittedLogs(logs as any, m.commitHash);
 }
 
 // ---- hunting
@@ -78,39 +109,59 @@ async function commitOne(claimId: bigint, buyerPubKey: Hex, a: number, b: number
   // The reviewer's attack: a real commitment, then random bytes of a real ciphertext's length.
   const ciphertext = attack === "garbage" ? randomBytesHex(hexToBytes(sealed.ciphertext).length) : sealed.ciphertext;
   const bond = await market.read.bondFor([claimId]) as bigint;
+  const since = await publicClient.getBlock();
+  mine[hash] = {
+    claimId: claimId.toString(), commitHash: hash, plaintext, salt, ephemeralSecret: sealed.ephemeralSecret, ciphertext, attack,
+    sinceBlock: since.number.toString(), sinceAt: since.timestamp.toString(),
+  };
+  persist();
+  log("material persisted, sending commit", { claimId, hash });
   const rc = await send(publicClient, market.write.commit([claimId, hash], { value: bond }));
   const saleId = committedSaleIdFromReceipt(rc);
-  mine[saleId.toString()] = { claimId: claimId.toString(), plaintext, salt, ephemeralSecret: sealed.ephemeralSecret, ciphertext, attack };
+  mine[hash]!.saleId = saleId.toString();
   persist();
   log("committed", { saleId, claimId, hash, bond, tx: txLink(rc.transactionHash) });
   return saleId;
 }
 
-// ---- one pass over every sale this wallet holds material for: reveal what is committed, disclose
-// what is disputed, and report how many are still open.
+// ---- one pass over every sale this wallet holds material for: attach a missing sale id, reveal
+// what is committed, disclose what is disputed, and report how many are still open.
 const settled = new Set<string>();
 const states: Record<string, string> = {};
-let revealWindow = 0n;
+let revealWindow: bigint | null = null; // null: unread, so the chain judges each reveal itself
 async function tick(startup = false): Promise<number> {
   const now = (await publicClient.getBlock()).timestamp;
   let open = 0;
-  for (const [id, m] of Object.entries(mine)) {
-    if (settled.has(id)) continue;
-    const saleId = BigInt(id);
+  for (const [hash, m] of Object.entries(mine)) {
+    if (settled.has(hash)) continue;
+    if (!m.saleId) {
+      const id = await recoverSaleId(m);
+      if (id === null) {
+        const expired = revealWindow !== null && m.sinceAt !== undefined && now > BigInt(m.sinceAt) + revealWindow;
+        if (expired) { log("commit never landed and its reveal window has passed, dropping the material", { hash, claimId: m.claimId }); delete mine[hash]; persist(); continue; }
+        if (startup) log("commit sent but no Committed log yet, will keep looking", { hash, claimId: m.claimId });
+        open++;
+        continue;
+      }
+      m.saleId = id.toString();
+      persist();
+      log("recovered the sale id from the Committed log", { saleId: id, hash });
+    }
+    const saleId = BigInt(m.saleId);
     const s = await market.read.getSale([saleId]) as any;
-    states[id] = STATE_NAMES[s.state as number] ?? String(s.state);
+    states[m.saleId] = STATE_NAMES[s.state as number] ?? String(s.state);
     if (isTerminal(s.state)) {
-      settled.add(id);
-      if (!startup) log("sale reached a terminal state", { saleId, state: states[id] });
+      settled.add(hash);
+      if (!startup) log("sale reached a terminal state", { saleId, state: states[m.saleId] });
       continue;
     }
     open++;
     if (s.state === S.Committed) {
-      if (now > BigInt(s.committedAt) + revealWindow) continue; // the sweep will expire it
+      if (revealWindow !== null && now > BigInt(s.committedAt) + revealWindow) continue; // the sweep will expire it
       const rr = await send(publicClient, market.write.reveal([saleId, m.ciphertext]));
       log(m.attack === "garbage" ? "attack garbage: revealed random bytes instead of the sealed envelope" : "revealed",
         { saleId, bytes: hexToBytes(m.ciphertext).length, tx: txLink(rr.transactionHash) });
-    } else if (s.state === S.Disputed && (s.plaintext as string) === "0x") {
+    } else if (s.state === S.Disputed && !isDisclosed(s)) {
       const rc = await send(publicClient, market.write.disclose([saleId, m.plaintext, m.salt, m.ephemeralSecret]));
       log("disputed by buyer, disclosed plaintext, salt and ephemeral secret on-chain",
         { saleId, reason: REASON_NAMES[s.disputeReason as number] ?? s.disputeReason, tx: txLink(rc.transactionHash) });
@@ -119,23 +170,25 @@ async function tick(startup = false): Promise<number> {
   return open;
 }
 
-const errText = (e: unknown) => String(e instanceof Error ? e.message : e).slice(0, 200);
-
 async function hunt() {
   const claimId = BigInt(opt("claim", "0"));
   const max = Number(opt("max", "1"));
   const seconds = Number(opt("seconds", "900"));
   const until = Date.now() + seconds * 1000;
   log("hunting", { claimId, max, attack, budget, seconds, loaded: Object.keys(mine).length });
-  revealWindow = await market.read.revealWindow() as bigint;
-  // Startup pass: classify what an earlier run left behind, and reveal or disclose anything still owed.
+  // Every startup read is guarded on its own: a bad --claim or a flaky RPC must never stop this
+  // wallet from revealing or disclosing what an earlier run already owes.
+  try { revealWindow = await market.read.revealWindow() as bigint; }
+  catch (e) { log("could not read the reveal window, the chain will judge each reveal", { error: errText(e) }); }
   try { const open = await tick(true); if (Object.keys(mine).length) log("loaded earlier sales", { open, states }); }
   catch (e) { log("startup pass failed, continuing", { error: errText(e) }); }
-  const claim = await market.read.getClaim([claimId]) as any;
+  let claim: any = null;
+  try { claim = await market.read.getClaim([claimId]); }
+  catch (e) { log("claim could not be read, skipping the hunt", { claimId, error: errText(e) }); }
   let sold = 0;
-  if (!claimIsSupported(claim)) {
+  if (claim && !claimIsSupported(claim)) {
     log("unsupported claim, skipping", { claimId, modelId: claim.modelId });
-  } else {
+  } else if (claim) {
     while (sold < max && Date.now() < until) {
       try {
         const c = await market.read.getClaim([claimId]) as any;
