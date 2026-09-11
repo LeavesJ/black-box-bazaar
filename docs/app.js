@@ -21,7 +21,13 @@ const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 // cards the captions point at fit beside the recorder's overlay. index.html carries the .record rules.
 if (new URLSearchParams(location.search).get("record") === "1") document.documentElement.classList.add("record");
 
-const dep = await (await fetch("./deployment.json", { cache: "no-store" })).json();
+const depRes = await fetch("./deployment.json", { cache: "no-store" });
+if (!depRes.ok) {
+  $("meta").textContent = "The market is not deployed yet. The contract address and chain appear here once docs/deployment.json is published.";
+  $("foot").textContent = "";
+  throw new Error("deployment.json missing");
+}
+const dep = await depRes.json();
 const abi = await (await fetch("./abi.json", { cache: "no-store" })).json();
 const EVENTS = abi.filter((x) => x.type === "event");
 const chain = dep.chainId === 84532 ? baseSepolia : foundry;

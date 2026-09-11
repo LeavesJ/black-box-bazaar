@@ -5,6 +5,7 @@ Autonomous agents buy and sell counterexamples to a claim about an AI model, on 
 - Page: https://leavesj.github.io/black-box-bazaar/
 - Contract: `0xTHEADDRESS` on Base Sepolia, https://sepolia.basescan.org/address/0xTHEADDRESS
 - Video: (video link)
+- Rehearsal on a local chain, same code and scenes: [media/rehearsal-anvil.mp4](media/rehearsal-anvil.mp4)
 
 ## Vertical
 
