@@ -135,8 +135,10 @@ contract RefutationMarketTest is Test {
         return keccak256(abi.encode(claimId, PT, SALT));
     }
     function _commit(uint256 claimId) internal returns (uint256) {
+        uint256 bond = m.bondFor(claimId);   // read before pranking: a prank is spent by the next external call
+        bytes32 h = _hash(claimId);
         vm.prank(seller);
-        return m.commit{value: m.bondFor(claimId)}(claimId, _hash(claimId));
+        return m.commit{value: bond}(claimId, h);
     }
     function _reveal(uint256 saleId) internal {
         vm.prank(seller);
@@ -184,32 +186,39 @@ contract RefutationMarketTest is Test {
     function test_commit_revertsOnDuplicateHash() public {
         uint256 cid = _post();
         _commit(cid);
+        uint256 bond = m.bondFor(cid);
+        bytes32 h = _hash(cid);
         vm.prank(seller);
         vm.expectRevert(RefutationMarket.DuplicateCommit.selector);
-        m.commit{value: m.bondFor(cid)}(cid, _hash(cid));
+        m.commit{value: bond}(cid, h);
     }
 
     function test_commit_revertsWhenFull() public {
         uint256 cid = _postMax(1);
         _commit(cid);
+        uint256 bond = m.bondFor(cid);
         vm.prank(other);
         vm.expectRevert(RefutationMarket.ClaimFull.selector);
-        m.commit{value: m.bondFor(cid)}(cid, keccak256("another"));
+        m.commit{value: bond}(cid, keccak256("another"));
     }
 
     function test_commit_revertsOnWrongBond() public {
         uint256 cid = _post();
+        uint256 bond = m.bondFor(cid);
+        bytes32 h = _hash(cid);
         vm.prank(seller);
-        vm.expectRevert(abi.encodeWithSelector(RefutationMarket.WrongValue.selector, m.bondFor(cid), 1));
-        m.commit{value: 1}(cid, _hash(cid));
+        vm.expectRevert(abi.encodeWithSelector(RefutationMarket.WrongValue.selector, bond, 1));
+        m.commit{value: 1}(cid, h);
     }
 
     function test_commit_revertsAfterExpiry() public {
         uint256 cid = _post();
         vm.warp(block.timestamp + 1 hours);
+        uint256 bond = m.bondFor(cid);
+        bytes32 h = _hash(cid);
         vm.prank(seller);
         vm.expectRevert(RefutationMarket.ClaimNotOpen.selector);
-        m.commit{value: m.bondFor(cid)}(cid, _hash(cid));
+        m.commit{value: bond}(cid, h);
     }
 
     // ---- reveal ----
@@ -447,9 +456,9 @@ Add inside the test contract, after `_reveal`:
 
 ```solidity
     function _dispute(uint256 saleId) internal {
-        uint256 cid = m.getSale(saleId).claimId;
+        uint256 bond = m.bondFor(m.getSale(saleId).claimId);
         vm.prank(buyer);
-        m.dispute{value: m.bondFor(cid)}(saleId);
+        m.dispute{value: bond}(saleId);
     }
     function _disclose(uint256 saleId) internal {
         vm.prank(seller);
@@ -937,7 +946,7 @@ git add script scripts docs/abi.json agents/src/abi.json && git commit -q -m "fe
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test 'test/*.test.ts'",
     "buyer": "node --env-file=../.env src/buyer.ts",
     "seller": "node --env-file=../.env src/seller.ts",
     "arbiter": "node --env-file=../.env src/arbiter.ts",
