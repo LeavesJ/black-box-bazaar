@@ -1,0 +1,7 @@
+{
+ "chainId": 84532,
+ "address": "0xf347ff05478ad271adab818696134bc3cd0a07ed",
+ "rpc": "https://sepolia.base.org",
+ "explorer": "https://sepolia.basescan.org",
+ "deployedBlock": 46671490
+}
