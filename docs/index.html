@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Black Box Bazaar</title>
+<style>
+  :root { --bg:#0b0d10; --panel:#12161b; --line:#232a32; --text:#e6e9ec; --muted:#8a94a0; --ok:#3ddc97; --bad:#ff6b6b; --warn:#ffc857; --unk:#8a94a0; --link:#7ab8ff; }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif }
+  header { padding:22px 28px 10px; border-bottom:1px solid var(--line) }
+  h1 { margin:0; font-size:20px; letter-spacing:.2px }
+  h1 small { color:var(--muted); font-weight:400; margin-left:10px }
+  .thesis { color:var(--muted); margin:6px 0 0 }
+  main { display:grid; grid-template-columns: 1.1fr 1.6fr .9fr; gap:16px; padding:16px 28px 40px }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; min-height:120px }
+  h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.8px; color:var(--muted) }
+  .card { border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin-bottom:10px }
+  .row { display:flex; justify-content:space-between; gap:10px; align-items:baseline }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px }
+  .muted { color:var(--muted) }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; letter-spacing:.3px; border:1px solid var(--line) }
+  .Committed { color:var(--warn) } .Revealed { color:var(--link) } .Confirmed { color:var(--ok) } .Upheld { color:var(--ok) }
+  .Disputed { color:var(--warn) } .Refuted { color:var(--bad) } .Withdrawn { color:var(--bad) } .Unadjudicated { color:var(--unk) }
+  .head { font-size:22px; font-weight:700 }
+  .head.ok { color:var(--ok) } .head.bad { color:var(--bad) } .head.unk { color:var(--unk) }
+  .triple { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:6px }
+  .triple div { background:var(--bg); border-radius:4px; padding:6px 8px }
+  .triple b { display:block; font-size:16px }
+  a { color:var(--link); text-decoration:none } a:hover { text-decoration:underline }
+  .ct { word-break:break-all; color:var(--muted); font-size:11px; max-height:38px; overflow:hidden }
+  footer { padding:0 28px 30px; color:var(--muted); font-size:12px }
+  @media (max-width: 1100px) { main { grid-template-columns:1fr } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Black Box Bazaar <small>a market of refutations</small></h1>
+  <p class="thesis">Buyers escrow bounties for counterexamples to a claim about a pinned model. Sellers reveal them encrypted. A sale counts only once it is adjudicated. <b>Silence is not evidence.</b></p>
+  <p class="mono muted" id="meta">loading deployment…</p>
+</header>
+<main>
+  <section><h2>Claims</h2><div id="claims"></div></section>
+  <section><h2>Sales</h2><div id="sales"></div></section>
+  <section><h2>Reputation</h2><div id="rep"></div></section>
+</main>
+<footer id="foot"></footer>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

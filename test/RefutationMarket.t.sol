@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {RefutationMarket} from "../src/RefutationMarket.sol";
 
 contract RefutationMarketTest is Test {
@@ -14,23 +14,27 @@ contract RefutationMarketTest is Test {
     uint64 constant REVEAL = 90;
     uint64 constant ADJ = 90;
     uint64 constant DISC = 90;
+    uint64 constant ARB = 90;
     uint256 constant BOUNTY = 0.0005 ether;
     uint32 constant MAX = 3;
+    uint64 constant DURATION = 1 hours;
     bytes32 constant PUB = bytes32(uint256(0xABCD));
+    bytes32 constant EPH = bytes32(uint256(0xE9E9));
+    bytes CT = hex"deadbeef";
     bytes PT = bytes('{"a":123,"b":456}');
     bytes32 constant SALT = bytes32(uint256(0x1111111111111111111111111111111111111111111111111111111111111111));
 
     function setUp() public {
-        m = new RefutationMarket(arbiter, REVEAL, ADJ, DISC, 2000);
+        m = new RefutationMarket(arbiter, REVEAL, ADJ, DISC, ARB, 2000);
         vm.deal(buyer, 1 ether);
         vm.deal(seller, 1 ether);
         vm.deal(other, 1 ether);
     }
 
-    // ---- helpers ----
+    // ---- helpers (read anything external BEFORE pranking: a prank is spent by the next call) ----
     function _postMax(uint32 max) internal returns (uint256) {
         vm.prank(buyer);
-        return m.postClaim{value: BOUNTY * max}("claude-haiku-4-5-20251001", "spec", PUB, BOUNTY, max, 1 hours);
+        return m.postClaim{value: BOUNTY * max}("claude-haiku-4-5-20251001", "spec", PUB, BOUNTY, max, DURATION);
     }
     function _post() internal returns (uint256) { return _postMax(MAX); }
     function _hash(uint256 claimId) internal view returns (bytes32) {
@@ -44,22 +48,32 @@ contract RefutationMarketTest is Test {
     }
     function _reveal(uint256 saleId) internal {
         vm.prank(seller);
-        m.reveal(saleId, hex"deadbeef");
+        m.reveal(saleId, CT);
     }
     function _dispute(uint256 saleId) internal {
         uint256 bond = m.bondFor(m.getSale(saleId).claimId);
         vm.prank(buyer);
-        m.dispute{value: bond}(saleId);
+        m.dispute{value: bond}(saleId, RefutationMarket.DisputeReason.NotReproduced);
     }
     function _disclose(uint256 saleId) internal {
         vm.prank(seller);
-        m.disclose(saleId, PT, SALT);
+        m.disclose(saleId, PT, SALT, EPH);
     }
     function _revealedSale() internal returns (uint256 cid, uint256 sid) {
         cid = _post();
         sid = _commit(cid);
         _reveal(sid);
     }
+    function _disclosedSale() internal returns (uint256 cid, uint256 sid) {
+        (cid, sid) = _revealedSale();
+        _dispute(sid);
+        _disclose(sid);
+    }
+    function _rep(address who) internal view returns (RefutationMarket.Rep memory r) {
+        (r.sellerConfirmed, r.sellerRefuted, r.sellerUnadjudicated, r.sellerWithdrawn, r.sellerUnarbitrated,
+         r.buyerAdjudicated, r.buyerSilent, r.buyerDisputesLost) = m.rep(who);
+    }
+    function _state(uint256 sid) internal view returns (RefutationMarket.SaleState) { return m.getSale(sid).state; }
 
     // ---- claim ----
     function test_postClaim_escrowsAndStores() public {
@@ -73,7 +87,7 @@ contract RefutationMarketTest is Test {
         assertEq(c.hits, 0);
         assertEq(c.pending, 0);
         assertEq(c.buyerPubKey, PUB);
-        assertEq(c.expiresAt, uint64(block.timestamp) + 1 hours);
+        assertEq(c.expiresAt, uint64(block.timestamp) + DURATION);
         assertFalse(c.closed);
         assertEq(m.claimCount(), 1);
     }
@@ -81,7 +95,7 @@ contract RefutationMarketTest is Test {
     function test_postClaim_revertsOnWrongValue() public {
         vm.prank(buyer);
         vm.expectRevert(abi.encodeWithSelector(RefutationMarket.WrongValue.selector, BOUNTY * MAX, BOUNTY));
-        m.postClaim{value: BOUNTY}("m", "s", PUB, BOUNTY, MAX, 1 hours);
+        m.postClaim{value: BOUNTY}("m", "s", PUB, BOUNTY, MAX, DURATION);
     }
 
     // ---- commit ----
@@ -129,7 +143,7 @@ contract RefutationMarketTest is Test {
 
     function test_commit_revertsAfterExpiry() public {
         uint256 cid = _post();
-        vm.warp(block.timestamp + 1 hours);
+        vm.warp(block.timestamp + DURATION);
         uint256 bond = m.bondFor(cid);
         bytes32 h = _hash(cid);
         vm.prank(seller);
@@ -144,7 +158,7 @@ contract RefutationMarketTest is Test {
         _reveal(sid);
         RefutationMarket.Sale memory s = m.getSale(sid);
         assertEq(uint8(s.state), uint8(RefutationMarket.SaleState.Revealed));
-        assertEq(s.ciphertext, hex"deadbeef");
+        assertEq(s.ciphertext, CT);
         assertEq(s.revealedAt, uint64(block.timestamp));
     }
 
@@ -153,7 +167,7 @@ contract RefutationMarketTest is Test {
         uint256 sid = _commit(cid);
         vm.prank(other);
         vm.expectRevert(RefutationMarket.NotSeller.selector);
-        m.reveal(sid, hex"01");
+        m.reveal(sid, CT);
     }
 
     function test_reveal_revertsAfterWindow() public {
@@ -162,7 +176,7 @@ contract RefutationMarketTest is Test {
         vm.warp(block.timestamp + REVEAL + 1);
         vm.prank(seller);
         vm.expectRevert(RefutationMarket.WindowClosed.selector);
-        m.reveal(sid, hex"01");
+        m.reveal(sid, CT);
     }
 
     // ---- confirm ----
@@ -172,14 +186,12 @@ contract RefutationMarketTest is Test {
         vm.prank(buyer);
         m.confirm(sid);
         assertEq(seller.balance, before + BOUNTY + m.bondFor(cid));
-        assertEq(uint8(m.getSale(sid).state), uint8(RefutationMarket.SaleState.Confirmed));
+        assertEq(uint8(_state(sid)), uint8(RefutationMarket.SaleState.Confirmed));
         assertEq(m.getClaim(cid).hits, 1);
         assertEq(m.getClaim(cid).pending, 0);
-        (uint32 conf,,,, uint32 adj,,) = m.rep(seller);
-        assertEq(conf, 1);
-        (,,,, uint32 badj,,) = m.rep(buyer);
-        assertEq(badj, 1);
-        assertEq(adj, 0);
+        assertEq(_rep(seller).sellerConfirmed, 1);
+        assertEq(_rep(buyer).buyerAdjudicated, 1);
+        assertEq(_rep(seller).buyerAdjudicated, 0);
     }
 
     function test_confirm_revertsForNonBuyer() public {
@@ -198,14 +210,18 @@ contract RefutationMarketTest is Test {
     }
 
     // ---- dispute / disclose ----
-    function test_dispute_takesBondAndSetsState() public {
+    function test_dispute_takesBondSetsStateAndRecordsReason() public {
         (uint256 cid, uint256 sid) = _revealedSale();
         uint256 before = address(m).balance;
-        _dispute(sid);
+        uint256 bond = m.bondFor(cid);
+        vm.prank(buyer);
+        m.dispute{value: bond}(sid, RefutationMarket.DisputeReason.CannotDecrypt);
         RefutationMarket.Sale memory s = m.getSale(sid);
         assertEq(uint8(s.state), uint8(RefutationMarket.SaleState.Disputed));
-        assertEq(s.buyerBond, m.bondFor(cid));
-        assertEq(address(m).balance, before + m.bondFor(cid));
+        assertEq(s.buyerBond, bond);
+        assertEq(uint8(s.disputeReason), uint8(RefutationMarket.DisputeReason.CannotDecrypt));
+        assertEq(address(m).balance, before + bond);
+        assertEq(_rep(buyer).buyerAdjudicated, 1);
     }
 
     function test_disclose_revertsOnHashMismatch() public {
@@ -213,14 +229,26 @@ contract RefutationMarketTest is Test {
         _dispute(sid);
         vm.prank(seller);
         vm.expectRevert(RefutationMarket.HashMismatch.selector);
-        m.disclose(sid, bytes('{"a":1,"b":2}'), SALT);
+        m.disclose(sid, bytes('{"a":1,"b":2}'), SALT, EPH);
     }
 
-    function test_disclose_storesPlaintext() public {
+    function test_disclose_storesPlaintextSecretAndTime() public {
         (, uint256 sid) = _revealedSale();
         _dispute(sid);
+        vm.warp(block.timestamp + 10);
         _disclose(sid);
-        assertEq(m.getSale(sid).plaintext, PT);
+        RefutationMarket.Sale memory s = m.getSale(sid);
+        assertEq(s.plaintext, PT);
+        assertEq(s.ephemeralSecret, EPH);
+        assertEq(s.salt, SALT);
+        assertEq(s.disclosedAt, uint64(block.timestamp));
+    }
+
+    function test_disclose_revertsWhenRepeated() public {
+        (, uint256 sid) = _disclosedSale();
+        vm.prank(seller);
+        vm.expectRevert(RefutationMarket.AlreadyDisclosed.selector);
+        m.disclose(sid, PT, SALT, EPH);
     }
 
     // ---- rule ----
@@ -233,45 +261,87 @@ contract RefutationMarketTest is Test {
     }
 
     function test_rule_revertsForNonArbiter() public {
-        (, uint256 sid) = _revealedSale();
-        _dispute(sid);
-        _disclose(sid);
+        (, uint256 sid) = _disclosedSale();
         vm.prank(other);
         vm.expectRevert(RefutationMarket.NotArbiter.selector);
         m.rule(sid, true);
     }
 
     function test_rule_upheld_paysSellerEverything() public {
-        (uint256 cid, uint256 sid) = _revealedSale();
-        _dispute(sid);
-        _disclose(sid);
+        (uint256 cid, uint256 sid) = _disclosedSale();
         uint256 before = seller.balance;
         vm.prank(arbiter);
         m.rule(sid, true);
         assertEq(seller.balance, before + BOUNTY + 2 * m.bondFor(cid));
-        assertEq(uint8(m.getSale(sid).state), uint8(RefutationMarket.SaleState.Upheld));
+        assertEq(uint8(_state(sid)), uint8(RefutationMarket.SaleState.Upheld));
         assertEq(m.getClaim(cid).hits, 1);
         assertEq(m.getClaim(cid).pending, 0);
-        (uint32 conf,,,,,, ) = m.rep(seller);
-        assertEq(conf, 1);
-        (,,,,,, uint32 lost) = m.rep(buyer);
-        assertEq(lost, 1);
+        assertEq(_rep(seller).sellerConfirmed, 1);
+        assertEq(_rep(buyer).buyerDisputesLost, 1);
     }
 
     function test_rule_refuted_paysBuyerBothBonds() public {
-        (uint256 cid, uint256 sid) = _revealedSale();
-        _dispute(sid);
-        _disclose(sid);
+        (uint256 cid, uint256 sid) = _disclosedSale();
         uint256 before = buyer.balance;
         vm.prank(arbiter);
         m.rule(sid, false);
         assertEq(buyer.balance, before + 2 * m.bondFor(cid));
-        assertEq(uint8(m.getSale(sid).state), uint8(RefutationMarket.SaleState.Refuted));
+        assertEq(uint8(_state(sid)), uint8(RefutationMarket.SaleState.Refuted));
         assertEq(m.getClaim(cid).hits, 0);
         assertEq(m.getClaim(cid).pending, 0);
-        (, uint32 refuted,,,,, ) = m.rep(seller);
-        assertEq(refuted, 1);
+        assertEq(_rep(seller).sellerRefuted, 1);
         assertEq(address(m).balance, BOUNTY * MAX);
+    }
+
+    function test_rule_stillAllowedAfterArbitrationWindow() public {
+        (, uint256 sid) = _disclosedSale();
+        vm.warp(block.timestamp + ARB + 1);
+        vm.prank(arbiter);
+        m.rule(sid, false);
+        assertEq(uint8(_state(sid)), uint8(RefutationMarket.SaleState.Refuted));
+    }
+
+    // ---- unarbitrated: the arbiter vanished ----
+    function test_resolveUnarbitrated_revertsWhileWindowOpen() public {
+        (, uint256 sid) = _disclosedSale();
+        vm.expectRevert(RefutationMarket.WindowOpen.selector);
+        m.resolveUnarbitrated(sid);
+    }
+
+    function test_resolveUnarbitrated_revertsBeforeDisclosure() public {
+        (, uint256 sid) = _revealedSale();
+        _dispute(sid);
+        vm.warp(block.timestamp + ARB + 1);
+        vm.expectRevert(RefutationMarket.NotDisclosed.selector);
+        m.resolveUnarbitrated(sid);
+    }
+
+    function test_resolveUnarbitrated_returnsOwnBondsReleasesBountyCreditsNobody() public {
+        (uint256 cid, uint256 sid) = _disclosedSale();
+        vm.warp(block.timestamp + ARB + 1);
+        uint256 sBefore = seller.balance;
+        uint256 bBefore = buyer.balance;
+        uint256 bond = m.bondFor(cid);
+        vm.prank(other);
+        m.resolveUnarbitrated(sid);
+        assertEq(seller.balance, sBefore + bond);
+        assertEq(buyer.balance, bBefore + bond);
+        assertEq(uint8(_state(sid)), uint8(RefutationMarket.SaleState.Unarbitrated));
+        assertEq(m.getClaim(cid).hits, 0);
+        assertEq(m.getClaim(cid).pending, 0);
+        RefutationMarket.Rep memory r = _rep(seller);
+        assertEq(r.sellerUnarbitrated, 1);
+        assertEq(r.sellerConfirmed, 0);
+        assertEq(r.sellerRefuted, 0);
+        assertEq(r.sellerUnadjudicated, 0);
+        assertEq(address(m).balance, BOUNTY * MAX);
+        // and the buyer can now recover the whole pool once the claim expires
+        vm.warp(block.timestamp + DURATION);
+        uint256 before = buyer.balance;
+        vm.prank(buyer);
+        m.closeClaim(cid);
+        assertEq(buyer.balance, before + BOUNTY * MAX);
+        assertEq(address(m).balance, 0);
     }
 
     // ---- windows ----
@@ -288,13 +358,11 @@ contract RefutationMarketTest is Test {
         vm.prank(other);
         m.settle(sid);
         assertEq(seller.balance, before + BOUNTY + m.bondFor(cid));
-        assertEq(uint8(m.getSale(sid).state), uint8(RefutationMarket.SaleState.Unadjudicated));
+        assertEq(uint8(_state(sid)), uint8(RefutationMarket.SaleState.Unadjudicated));
         assertEq(m.getClaim(cid).hits, 1);
-        (uint32 conf,, uint32 unadj,,,, ) = m.rep(seller);
-        assertEq(conf, 0);
-        assertEq(unadj, 1);
-        (,,,,, uint32 silent, ) = m.rep(buyer);
-        assertEq(silent, 1);
+        assertEq(_rep(seller).sellerConfirmed, 0);
+        assertEq(_rep(seller).sellerUnadjudicated, 1);
+        assertEq(_rep(buyer).buyerSilent, 1);
     }
 
     function test_expireCommit_slashesUnrevealed() public {
@@ -305,10 +373,9 @@ contract RefutationMarketTest is Test {
         vm.prank(other);
         m.expireCommit(sid);
         assertEq(buyer.balance, before + m.bondFor(cid));
-        assertEq(uint8(m.getSale(sid).state), uint8(RefutationMarket.SaleState.Withdrawn));
+        assertEq(uint8(_state(sid)), uint8(RefutationMarket.SaleState.Withdrawn));
         assertEq(m.getClaim(cid).pending, 0);
-        (,,, uint32 wd,,, ) = m.rep(seller);
-        assertEq(wd, 1);
+        assertEq(_rep(seller).sellerWithdrawn, 1);
     }
 
     function test_withdrawSale_slashesUndisclosed() public {
@@ -319,15 +386,22 @@ contract RefutationMarketTest is Test {
         vm.prank(other);
         m.withdrawSale(sid);
         assertEq(buyer.balance, before + 2 * m.bondFor(cid));
-        assertEq(uint8(m.getSale(sid).state), uint8(RefutationMarket.SaleState.Withdrawn));
+        assertEq(uint8(_state(sid)), uint8(RefutationMarket.SaleState.Withdrawn));
         assertEq(m.getClaim(cid).pending, 0);
+    }
+
+    function test_withdrawSale_revertsOnceDisclosed() public {
+        (, uint256 sid) = _disclosedSale();
+        vm.warp(block.timestamp + DISC + 1);
+        vm.expectRevert(RefutationMarket.AlreadyDisclosed.selector);
+        m.withdrawSale(sid);
     }
 
     function test_closeClaim_refundsRemainder() public {
         (uint256 cid, uint256 sid) = _revealedSale();
         vm.prank(buyer);
         m.confirm(sid);
-        vm.warp(block.timestamp + 1 hours);
+        vm.warp(block.timestamp + DURATION);
         uint256 before = buyer.balance;
         vm.prank(buyer);
         m.closeClaim(cid);
@@ -338,7 +412,7 @@ contract RefutationMarketTest is Test {
 
     function test_closeClaim_revertsWithPending() public {
         (uint256 cid, ) = _revealedSale();
-        vm.warp(block.timestamp + 1 hours);
+        vm.warp(block.timestamp + DURATION);
         vm.prank(buyer);
         vm.expectRevert(RefutationMarket.ClaimHasPending.selector);
         m.closeClaim(cid);

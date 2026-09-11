@@ -8,7 +8,10 @@ pragma solidity ^0.8.24;
 /// the arbiter upholds them, or the buyer stays silent past the window.
 /// Silence pays the seller but is recorded as unadjudicated, never confirmed.
 contract RefutationMarket {
-    enum SaleState { Committed, Revealed, Confirmed, Disputed, Refuted, Upheld, Unadjudicated, Withdrawn }
+    enum SaleState { Committed, Revealed, Confirmed, Disputed, Refuted, Upheld, Unadjudicated, Withdrawn, Unarbitrated }
+
+    /// @dev Why the buyer disputed. Recorded so the arbiter checks delivery before running the model.
+    enum DisputeReason { CannotDecrypt, CommitMismatch, NotReproduced }
 
     struct Claim {
         address buyer;
@@ -34,6 +37,10 @@ contract RefutationMarket {
         uint64 disputedAt;
         uint256 buyerBond;
         bytes plaintext;
+        uint64 disclosedAt;
+        bytes32 salt;
+        bytes32 ephemeralSecret;
+        DisputeReason disputeReason;
         SaleState state;
     }
 
@@ -42,6 +49,7 @@ contract RefutationMarket {
         uint32 sellerRefuted;
         uint32 sellerUnadjudicated;
         uint32 sellerWithdrawn;
+        uint32 sellerUnarbitrated;
         uint32 buyerAdjudicated;
         uint32 buyerSilent;
         uint32 buyerDisputesLost;
@@ -51,6 +59,7 @@ contract RefutationMarket {
     uint64 public immutable revealWindow;
     uint64 public immutable adjudicationWindow;
     uint64 public immutable disclosureWindow;
+    uint64 public immutable arbitrationWindow;
     uint256 public immutable bondBps;
 
     Claim[] private _claims;
@@ -62,8 +71,9 @@ contract RefutationMarket {
     event Committed(uint256 indexed saleId, uint256 indexed claimId, address indexed seller, bytes32 commitHash, uint256 bond);
     event Revealed(uint256 indexed saleId, uint256 indexed claimId, bytes ciphertext);
     event Confirmed(uint256 indexed saleId, uint256 indexed claimId);
-    event Disputed(uint256 indexed saleId, uint256 indexed claimId, uint256 buyerBond);
-    event Disclosed(uint256 indexed saleId, uint256 indexed claimId, bytes plaintext, bytes32 salt);
+    event Disputed(uint256 indexed saleId, uint256 indexed claimId, uint256 buyerBond, DisputeReason reason);
+    event Disclosed(uint256 indexed saleId, uint256 indexed claimId, bytes plaintext, bytes32 salt, bytes32 ephemeralSecret);
+    event Unarbitrated(uint256 indexed saleId, uint256 indexed claimId);
     event Ruled(uint256 indexed saleId, uint256 indexed claimId, bool sellerWasRight);
     event Settled(uint256 indexed saleId, uint256 indexed claimId);
     event Withdrawn(uint256 indexed saleId, uint256 indexed claimId, string reason);
@@ -87,12 +97,13 @@ contract RefutationMarket {
     error ZeroArgument();
     error TransferFailed();
 
-    constructor(address _arbiter, uint64 _revealWindow, uint64 _adjudicationWindow, uint64 _disclosureWindow, uint256 _bondBps) {
-        if (_arbiter == address(0) || _revealWindow == 0 || _adjudicationWindow == 0 || _disclosureWindow == 0) revert ZeroArgument();
+    constructor(address _arbiter, uint64 _revealWindow, uint64 _adjudicationWindow, uint64 _disclosureWindow, uint64 _arbitrationWindow, uint256 _bondBps) {
+        if (_arbiter == address(0) || _revealWindow == 0 || _adjudicationWindow == 0 || _disclosureWindow == 0 || _arbitrationWindow == 0) revert ZeroArgument();
         arbiter = _arbiter;
         revealWindow = _revealWindow;
         adjudicationWindow = _adjudicationWindow;
         disclosureWindow = _disclosureWindow;
+        arbitrationWindow = _arbitrationWindow;
         bondBps = _bondBps;
     }
 
@@ -169,7 +180,7 @@ contract RefutationMarket {
         _pay(s.seller, c.bounty + s.sellerBond);
     }
 
-    function dispute(uint256 saleId) external payable {
+    function dispute(uint256 saleId, DisputeReason reason) external payable {
         Sale storage s = _sales[saleId];
         Claim storage c = _claims[s.claimId];
         if (msg.sender != c.buyer) revert NotBuyer();
@@ -179,12 +190,15 @@ contract RefutationMarket {
         if (msg.value != bond) revert WrongValue(bond, msg.value);
         s.buyerBond = bond;
         s.disputedAt = uint64(block.timestamp);
+        s.disputeReason = reason;
         s.state = SaleState.Disputed;
         rep[c.buyer].buyerAdjudicated += 1;
-        emit Disputed(saleId, s.claimId, bond);
+        emit Disputed(saleId, s.claimId, bond, reason);
     }
 
-    function disclose(uint256 saleId, bytes calldata plaintext, bytes32 salt) external {
+    /// @notice Answer a dispute. The ephemeral secret lets the arbiter re-derive the posted
+    /// ciphertext and check that delivery actually happened before it runs the model.
+    function disclose(uint256 saleId, bytes calldata plaintext, bytes32 salt, bytes32 ephemeralSecret) external {
         Sale storage s = _sales[saleId];
         if (msg.sender != s.seller) revert NotSeller();
         _requireState(s, SaleState.Disputed);
@@ -192,7 +206,10 @@ contract RefutationMarket {
         if (block.timestamp > s.disputedAt + disclosureWindow) revert WindowClosed();
         if (keccak256(abi.encode(s.claimId, plaintext, salt)) != s.commitHash) revert HashMismatch();
         s.plaintext = plaintext;
-        emit Disclosed(saleId, s.claimId, plaintext, salt);
+        s.salt = salt;
+        s.ephemeralSecret = ephemeralSecret;
+        s.disclosedAt = uint64(block.timestamp);
+        emit Disclosed(saleId, s.claimId, plaintext, salt, ephemeralSecret);
     }
 
     function rule(uint256 saleId, bool sellerWasRight) external {
@@ -214,6 +231,23 @@ contract RefutationMarket {
             rep[s.seller].sellerRefuted += 1;
             _pay(c.buyer, s.sellerBond + s.buyerBond);
         }
+    }
+
+    /// @notice The arbiter never ruled. Each party takes back its own bond, the reserved bounty
+    /// returns to the claim, and the seller is neither credited nor refuted. The buyer keeps the
+    /// disclosed information without paying; that is the stated tradeoff of a vanished arbiter.
+    function resolveUnarbitrated(uint256 saleId) external {
+        Sale storage s = _sales[saleId];
+        Claim storage c = _claims[s.claimId];
+        _requireState(s, SaleState.Disputed);
+        if (s.plaintext.length == 0) revert NotDisclosed();
+        if (block.timestamp <= s.disclosedAt + arbitrationWindow) revert WindowOpen();
+        s.state = SaleState.Unarbitrated;
+        c.pending -= 1;
+        rep[s.seller].sellerUnarbitrated += 1;
+        emit Unarbitrated(saleId, s.claimId);
+        _pay(s.seller, s.sellerBond);
+        _pay(c.buyer, s.buyerBond);
     }
 
     // ---------- windows ----------
