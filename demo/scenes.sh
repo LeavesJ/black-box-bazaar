@@ -47,7 +47,7 @@ DEPLOYMENT="$ROOT/docs/deployment.json"
 MIN_DWELL="${MIN_DWELL:-7}"   # seconds a caption stays up before the next line may replace it
 TITLE_S="${TITLE_S:-3.5}"     # seconds a title card covers the page (record.mjs TITLE_MS; keep them equal)
 CARD_PAD="${CARD_PAD:-0.5}"   # a pure title card holds TITLE_S + CARD_PAD, so the next caption lands as it lifts
-NAV_ALLOW="${NAV_ALLOW:-5}"   # seconds added to an epilogue hold for the recorder's page load
+NAV_ALLOW="${NAV_ALLOW:-7}"   # seconds added to an epilogue hold for the recorder's page load and first read (keep 10 + this under cut.sh GAP)
 FINAL_S="${FINAL_S:-5}"       # seconds the final card holds before END
 LIVE_PAGE="${LIVE_PAGE:-https://leavesj.github.io/black-box-bazaar/}"   # the epilogue's first stop
 EPILOGUE="${EPILOGUE:-0}"
@@ -170,6 +170,9 @@ goto_caption() {
   emit 0 "$2" "" "" "" grey "" "" "" "$1" "$(( $3 + NAV_ALLOW ))"
   log "[epilogue] $1 · $2"
 }
+# wait_dwell: sleeps until the line on screen has had its hold, so a transaction sent next never lands on the page
+# under an older caption it would contradict (a claim appearing under "the market is empty").
+wait_dwell() { python3 -c 'import sys, time; time.sleep(max(float(sys.argv[1]) - time.time(), 0))' "$NEXT_AT"; }
 
 # ---------- chain reads (cast, jq-free) ----------
 ccall() { cast call "$MARKET_ADDRESS" "$@" --rpc-url "$RPC_URL"; }
@@ -364,6 +367,7 @@ caption 0 "" grey "" "" "The market is $( [ "$C0" = 0 ] && [ "$S0" = 0 ] && echo
 
 # Scene 1 — honest sale, on the seller wallet. The claim is posted before the card, so the card lifts onto its caption.
 gate 1
+wait_dwell
 CLAIM_A="$(post_claim)"; [ -n "$CLAIM_A" ] || die "no CLAIM_ID from buyer post"
 card 1 "Scene 1 · An honest sale" "The buyer posts a claim. The seller finds a counterexample. The buyer checks it and pays."
 caption 1 claim blue "claim:$CLAIM_A" "THE CLAIM" "The buyer posts a claim: this model multiplies three-digit numbers correctly. It escrows $(word "$(claim_field "$CLAIM_A" "$CF_MAX_HITS")") bounties."

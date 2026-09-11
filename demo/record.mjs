@@ -8,8 +8,9 @@
 // scene.txt is one JSON line: {"caption","note","focus","label","color","step","scene","title","subtitle","goto",
 // "card_s"}; plain text is still accepted as a bare caption. A focus of sale:N, claim:N or addr:0x… scrolls that
 // card under the top strip and outlines it until the next focus. A title covers the page with a card for TITLE_MS,
-// or card_s seconds when set. A goto navigates the page (the epilogue) under a cover that keeps the last caption
-// on screen until the overlays are back, then re-injects them. Recording stops at caption END.
+// or card_s seconds when set, and lifts only once a caption line has replaced it. A goto navigates the page (the
+// epilogue) under a cover carrying the last caption, then the new one, until the page has drawn its data.
+// Recording stops at caption END.
 import { chromium } from "playwright";
 import { readFileSync, existsSync, readdirSync, mkdirSync, renameSync, unlinkSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,7 +29,8 @@ const SCENE = join(here, "scene.txt");
 const TIMELINE = join(here, "timeline.json");
 const OVERLAY_SRC = readFileSync(join(here, "..", "docs", "overlay.js"), "utf8");
 const NAV_TIMEOUT_MS = 15000; // a goto waits for domcontentloaded at most this long, then carries on regardless
-const NAV_SETTLE_MS = 1500;   // after domcontentloaded, before the overlays go back on and the cover comes off
+const NAV_SETTLE_MS = 1500;   // after domcontentloaded, before the overlays go back on
+const READY_MS = 8000;        // then how long the cover waits for the page to draw its data (footer "Refreshed")
 const POLL_MS = 700;
 
 // Nothing from an earlier run may reach this recording: old agent logs would fill the overlay until scenes.sh
@@ -68,7 +70,7 @@ const cardMs = (line) => line.card_s > 0 ? line.card_s * 1000 : TITLE_MS;
 // script that carries overlay.js itself, over the next document as soon as it has a root; then the page loads,
 // settles, and gets the furniture back. The caller applies the new line and then uncovers. A slow or refused
 // load is not fatal. One init script per goto: the epilogue has one.
-async function navigate(url, prev) {
+async function navigate(url, prev, next) {
   const args = await page.evaluate(([l, wait]) => window.BBB.coverArgs(l, wait), [prev, NAV_TIMEOUT_MS + NAV_SETTLE_MS]).catch(() => null);
   if (args) {
     await page.evaluate((a) => window.BBB.cover(a), args).catch(() => {});
@@ -77,6 +79,12 @@ async function navigate(url, prev) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS }).catch(() => {});
   await page.waitForTimeout(NAV_SETTLE_MS);
   await inject(true);
+  // The new line's words go onto the cover at once, and the cover stays until the page has drawn its data (a bazaar
+  // page's footer then reads "Refreshed"; any other page is waited on for READY_MS), so neither a load in progress
+  // nor a failed first read is ever on screen.
+  const nextArgs = await page.evaluate(([l, wait]) => window.BBB.coverArgs(l, wait), [next, READY_MS + 1000]).catch(() => null);
+  if (nextArgs) await page.evaluate((a) => window.BBB.cover(a), nextArgs).catch(() => {});
+  await page.waitForFunction(() => /^Refreshed/.test(document.getElementById("foot")?.textContent || ""), null, { timeout: READY_MS, polling: 250 }).catch(() => {});
 }
 
 const tail = (file, n) => existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").slice(-n) : [];
@@ -182,7 +190,7 @@ while (true) {
       const prev = current; current = line;
       if (line.goto) {
         // The epilogue: the same overlays on a page this recorder did not serve, loaded under the last caption.
-        await navigate(line.goto, prev);
+        await navigate(line.goto, prev, line);
         external = true;
       }
       const withCard = !!line.title;
@@ -190,7 +198,8 @@ while (true) {
       await uncover();
       if (withCard) cardUntil = Date.now() + cardMs(line);
     }
-    if (cardUntil && Date.now() >= cardUntil) { cardUntil = 0; await dropCard(); }
+    // A title card lifts once its time is up and a caption line has replaced it, so the bar is never empty as it lifts.
+    if (cardUntil && Date.now() >= cardUntil && !current.title) { cardUntil = 0; await dropCard(); }
     // The callout follows the focus, and re-colours when the same card gets a new label or colour; it scrolls only on
     // a change of card. The page refreshes every few seconds, so a card the caption names may appear a moment later.
     const focusKey = `${current.focus}|${current.color}|${current.label}`;

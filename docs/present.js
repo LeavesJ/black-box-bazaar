@@ -110,16 +110,17 @@ function renderSteps(s) {
 
 // The overlays, driven exactly as the recorder drives them: a title card for TITLE_MS, a callout that follows the
 // focus and waits for a card the page has not rendered yet, and the agents' log lines.
-let lastKey = "", lastFocusKey = "", lastFocus = "", pending = null, cardTimer = 0, current = null;
+let lastKey = "", lastFocusKey = "", lastFocus = "", pending = null, cardUntil = 0, current = null;
 function applyLine(line) {
   const key = JSON.stringify(line);
   if (key !== lastKey) {
     lastKey = key; current = line;
     const withCard = !!line.title;
     BBB.apply(line, withCard);
-    clearTimeout(cardTimer);
-    if (withCard) cardTimer = setTimeout(() => BBB.dropCard(), BBB.cardMs(line)); else BBB.dropCard();
+    if (withCard) cardUntil = Date.now() + BBB.cardMs(line);
   }
+  // A title card lifts once its time is up and a caption line has replaced it, so the bar is never empty as it lifts.
+  if (cardUntil && Date.now() >= cardUntil && !line.title) { cardUntil = 0; BBB.dropCard(); }
   const focusKey = `${line.focus}|${line.color}|${line.label}`;
   if (focusKey !== lastFocusKey) {
     lastFocusKey = focusKey;
@@ -142,7 +143,7 @@ async function tick() {
   if (s.line && s.line.caption !== "END") applyLine({ caption: "", note: "", focus: "", label: "", color: "", step: "", scene: 0, title: "", subtitle: "", goto: "", card_s: 0, ...s.line });
   else if (s.line && current && current.title && lastKey !== "END") {
     // The run is over: the closing card comes down and its words stay in the caption bar, over the finished market.
-    lastKey = "END"; clearTimeout(cardTimer); BBB.dropCard();
+    lastKey = "END"; cardUntil = 0; BBB.dropCard();
     BBB.apply({ ...current, caption: current.title, note: current.subtitle, title: "", subtitle: "" }, false);
   }
   BBB.setLogs(s.logs || []);

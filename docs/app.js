@@ -11,10 +11,13 @@ const PARAMS = new URLSearchParams(location.search);
 const PRESENT = PARAMS.get("present") === "1";                 // the click-through presenter (docs/present.js, demo/console.mjs)
 const TIGHT = PARAMS.get("record") === "1" || PRESENT;         // the recorder's view, which the presenter shares
 const REFRESH_MS = TIGHT ? 1500 : 5000;                        // the recorder wants the badge under its caption
-// A getLogs error that names the span is the RPC's cap; anything else is transient and retried.
+// A rate limit, a dropped connection or a server error is transient: the same call again after a backoff. A getLogs
+// error that names the span is the RPC's cap: a smaller span. Transient is tested first, since "over rate limit"
+// would otherwise read as a span cap and burn requests halving a span that was never the problem.
+const TRANSIENT = /rate limit|too many requests|429|502|503|504|fetch|timeout|timed out|network|socket|ECONN/i;
 const RANGE_ERROR = /range|limit|too many|exceed/i;
-const RETRIES = 3;
-const RETRY_MS = 2000;
+const RETRIES = 4;
+const RETRY_MS = 1000;
 
 const $ = (id) => document.getElementById(id);
 const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
@@ -36,12 +39,24 @@ const dep = await depRes.json();
 const abi = await (await fetch("./abi.json", { cache: "no-store" })).json();
 const EVENTS = abi.filter((x) => x.type === "event");
 const chain = dep.chainId === 84532 ? baseSepolia : foundry;
-const client = createPublicClient({ chain, transport: http(dep.rpc) });
+// Where viem knows the chain's Multicall3 (Base Sepolia), concurrent reads are batched through it, so a first load
+// is a handful of requests rather than dozens against a rate-limited public RPC. Anvil has none; reads go singly.
+const client = createPublicClient({ chain, transport: http(dep.rpc), ...(chain.contracts?.multicall3 ? { batch: { multicall: true } } : {}) });
 const addrLink = (a) => dep.explorer ? `<a href="${dep.explorer}/address/${a}" target="_blank" class="mono">${short(a)}</a>` : `<span class="mono">${short(a)}</span>`;
 const txLink = (h) => dep.explorer ? `<a href="${dep.explorer}/tx/${h}" target="_blank" class="mono" title="${h}">${short(h)}</a>` : `<span class="mono" title="${h}">${short(h)}</span>`;
 $("meta").innerHTML = `contract ${addrLink(dep.address)} · chain ${dep.chainId} · rpc ${esc(dep.rpc)}`;
 
-const read = (fn, args = []) => client.readContract({ address: dep.address, abi, functionName: fn, args });
+// fn again after 1, 2, 4 and 8 s (plus jitter) while it fails transiently; any other failure, or the last, is thrown.
+async function retrying(fn) {
+  for (let i = 0; ; i++) {
+    try { return await fn(); }
+    catch (e) {
+      if (i >= RETRIES || !TRANSIENT.test(String(e?.message ?? e))) throw e;
+      await pause(RETRY_MS * 2 ** i + Math.random() * 300);
+    }
+  }
+}
+const read = (fn, args = []) => retrying(() => client.readContract({ address: dep.address, abi, functionName: fn, args }));
 
 // ---------- event history ----------
 // Fetched once from the deployment block in chunks, then only the blocks after the last one seen.
@@ -62,7 +77,7 @@ async function fetchRange(from, to) {
 }
 
 async function syncLogs() {
-  const latest = await client.getBlockNumber();
+  const latest = await retrying(() => client.getBlockNumber());
   let from = lastSeen + 1n;
   let retries = 0;
   while (from <= latest) {
@@ -74,23 +89,27 @@ async function syncLogs() {
       retries = 0;
     } catch (e) {
       const msg = String(e?.message ?? e);
-      if (RANGE_ERROR.test(msg)) {
+      if (!TRANSIENT.test(msg) && RANGE_ERROR.test(msg)) {
         // Public RPCs cap the block span of one getLogs call; halve until it fits, then give up loudly.
         if (chunk > CHUNK_FLOOR) { chunk = chunk / 2n; continue; }
         throw e;
       }
-      // A dropped connection or a server error: the same range again, a few times, then give up loudly.
-      if (retries < RETRIES) { retries++; await pause(RETRY_MS); continue; }
+      // A rate limit, a dropped connection or a server error: the same range again after a backoff, then give up loudly.
+      if (retries < RETRIES) { retries++; await pause(RETRY_MS * 2 ** retries); continue; }
       throw e;
     }
   }
   chunk = CHUNK_START;   // a full pass got through; the next one starts wide again
   logs.sort((a, b) => (a.blockNumber === b.blockNumber ? Number(a.logIndex - b.logIndex) : (a.blockNumber < b.blockNumber ? -1 : 1)));
+  // Block times are shown only off anvil (see when()); fetched three at a time, so a first load does not trip a rate limit.
+  if (dep.chainId === 31337) return;
   const missing = [...new Set(logs.map((l) => l.blockNumber.toString()))].filter((n) => !blockTime.has(n));
-  await Promise.all(missing.map(async (n) => {
-    const b = await client.getBlock({ blockNumber: BigInt(n) });
-    blockTime.set(n, Number(b.timestamp));
-  }));
+  for (let i = 0; i < missing.length; i += 3) {
+    await Promise.all(missing.slice(i, i + 3).map(async (n) => {
+      const b = await retrying(() => client.getBlock({ blockNumber: BigInt(n) }));
+      blockTime.set(n, Number(b.timestamp));
+    }));
+  }
 }
 
 // On anvil (31337) the clock is whatever evm_increaseTime last made it, so an event is placed by block number
@@ -133,19 +152,20 @@ async function load() {
   busy = true;
   try {
     await syncLogs();
-    const nClaims = Number(await read("claimCount"));
-    const nSales = Number(await read("saleCount"));
-    const claims = [], sales = [];
-    for (let i = 0; i < nClaims; i++) claims.push({ id: i, ...(await read("getClaim", [BigInt(i)])) });
-    for (let i = 0; i < nSales; i++) sales.push({ id: i, ...(await read("getSale", [BigInt(i)])) });
-    const addrs = new Set([...claims.map(c => c.buyer), ...sales.map(s => s.seller)]);
+    // Each group is read concurrently, so on Base Sepolia it goes out as one Multicall3 request.
+    const ids = (n) => Array.from({ length: n }, (_, i) => i);
+    const [nClaims, nSales] = (await Promise.all([read("claimCount"), read("saleCount")])).map(Number);
+    const claims = await Promise.all(ids(nClaims).map(async (i) => ({ id: i, ...(await read("getClaim", [BigInt(i)])) })));
+    const sales = await Promise.all(ids(nSales).map(async (i) => ({ id: i, ...(await read("getSale", [BigInt(i)])) })));
+    const addrs = [...new Set([...claims.map(c => c.buyer), ...sales.map(s => s.seller)])];
+    const rows = await Promise.all(addrs.map((a) => Promise.all([read("rep", [a]), read("owed", [a])])));
     const reps = {}, owed = {};
-    for (const a of addrs) {
-      const r = await read("rep", [a]);
+    addrs.forEach((a, k) => {
+      const [r, due] = rows[k];
       reps[a] = { sellerConfirmed: r[0], sellerRefuted: r[1], sellerUnadjudicated: r[2], sellerWithdrawn: r[3], sellerUnarbitrated: r[4],
                   buyerAdjudicated: r[5], buyerSilent: r[6], buyerDisputesLost: r[7] };
-      owed[a] = await read("owed", [a]);
-    }
+      owed[a] = due;
+    });
     render(claims, sales, reps, owed, new Set(claims.map(c => c.buyer)), new Set(sales.map(s => s.seller)));
   } finally {
     busy = false;

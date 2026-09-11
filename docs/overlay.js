@@ -11,7 +11,8 @@
 //                                  scroll and resize, and within a frame of any change under <main>
 //   selectorFor(focus)             "sale:N" | "claim:N" | "addr:0x…" -> the page's data-attribute selector, or ""
 //   setLogs(lines)                 the agents' NDJSON lines -> the log column, merged by timestamp, ties in the
-//                                  order given; seller-side lines never show the pair (a, b, answers, truth, pair)
+//                                  order given; seller- and buyer-side lines never show the pair (a, b, answers,
+//                                  truth, pair)
 //   coverArgs(line) · cover(args) · uncover()   a near-black cover carrying a caption across a navigation, sized from
 //                                  the caption bar so the text does not move; cover() also works from a
 //                                  document-start script, before <body> exists
@@ -24,8 +25,10 @@
   const FOCUS_PAD = 12;         // px between the top strip and a focused card's callout
   const TITLE_MS = 3500;        // how long a title card covers the page (scenes.sh TITLE_S; keep them equal)
   const FOCUS_WAIT_MS = 20000;  // how long a caller keeps looking for a focused card the page has not rendered yet
-  const SELLER_ROLES = new Set(["seller", "rogue", "newcomer", "quiet"]);
-  const HIDDEN_FOR_SELLERS = new Set(["a", "b", "answers", "truth"]);
+  // The pair is private until a dispute discloses it: the sellers hold it, and the buyer reads it once it is
+  // revealed. Their lines never show it. The arbiter's do: it only ever sees a pair already disclosed on-chain.
+  const PRIVATE_ROLES = new Set(["seller", "rogue", "newcomer", "quiet", "buyer"]);
+  const PRIVATE_FIELDS = new Set(["a", "b", "answers", "truth"]);
   const COLORS = { blue: "#7ab8ff", green: "#3ddc97", red: "#ff6b6b", orange: "#ffa657", grey: "#9aa4af", purple: "#c79bff", amber: "#ffc857" };
   const ROLE_COLOR = { buyer: "blue", seller: "green", rogue: "red", newcomer: "orange", quiet: "grey", arbiter: "purple", sweep: "amber" };
   const SCENE_COLOR = { 1: "green", 2: "red", 3: "orange", 4: "grey" };   // the badge: the colour of each scene's seller
@@ -66,7 +69,7 @@
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-  const focus = { sel: "", color: "", label: "", raf: 0 };   // the current callout, re-placed on layout shifts
+  const focus = { sel: "", color: "", label: "", raf: 0, anchor: null };   // the current callout; anchor: the viewport top focusOn placed it at
   let installed = false;
   let lastLogs = "";
 
@@ -88,6 +91,8 @@
     new MutationObserver(schedule).observe(document.querySelector("main") || document.body, { childList: true, subtree: true, characterData: true });
     addEventListener("scroll", schedule, { passive: true });
     addEventListener("resize", schedule);
+    // A person scrolling (the presenter) takes over from the anchor.
+    for (const ev of ["wheel", "touchmove", "keydown"]) addEventListener(ev, () => { focus.anchor = null; }, { passive: true });
   }
 
   // Everything the badge, tracker, caption bar and title card show for one scene line. The badge and tracker are
@@ -129,9 +134,15 @@
   // Pins the label tag to the top-left corner of the focused card, on the outline's outer edge.
   function place() {
     focus.raf = 0;
+    const el = focus.sel ? document.querySelector(focus.sel) : null;
+    // The card stays where focusOn put it while the page grows around it. The page rebuilds its lists on every
+    // refresh, which defeats the browser's own scroll anchoring, so the drift is scrolled back here.
+    if (el && focus.anchor !== null) {
+      const dy = el.getBoundingClientRect().top - focus.anchor;
+      if (Math.abs(dy) > 1) scrollBy({ top: dy, behavior: "instant" });
+    }
     const tag = $("bbb-tag");
     if (!tag) return;
-    const el = focus.sel ? document.querySelector(focus.sel) : null;
     if (!el || !focus.label) { tag.hidden = true; return; }
     if (tag.textContent !== focus.label) tag.textContent = focus.label;
     tag.style.background = focus.color; tag.hidden = false;
@@ -149,6 +160,7 @@
     const style = $("bbb-focus");
     if (!style) return false;
     style.textContent = el ? `${sel} { outline:3px solid ${color}; outline-offset:3px; box-shadow:0 0 22px ${color}55 }` : "";
+    if (!el || sel !== focus.sel) focus.anchor = null;
     focus.sel = el ? sel : ""; focus.color = color; focus.label = label;
     if (el && scroll) {
       // The callout's top goes FOCUS_PAD px under the strip: the tag, when there is one, then the card. When the
@@ -160,13 +172,14 @@
       r = el.getBoundingClientRect();
       const room = innerHeight - TOP_H - FOCUS_PAD - lead - CAP_H, over = r.bottom - (innerHeight - CAP_H);
       if (r.height <= room && over > 0) scrollBy({ top: over, behavior: "instant" });
+      focus.anchor = el.getBoundingClientRect().top;
     }
     place();
     return !!el;
   }
 
   // ---------- the log column ----------
-  const hidden = (role, key) => SELLER_ROLES.has(role) && (HIDDEN_FOR_SELLERS.has(key) || /pair/i.test(key));
+  const hidden = (role, key) => PRIVATE_ROLES.has(role) && (PRIVATE_FIELDS.has(key) || /pair/i.test(key));
   // A value on one line: a URL by its tail, a nested object or array as JSON, anything else as text.
   function show(v) {
     if (typeof v === "string" && v.startsWith("http")) return v.split("/").pop().slice(0, 10) + "…";
