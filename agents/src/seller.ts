@@ -5,10 +5,11 @@ import { fileURLToPath } from "node:url";
 import { bytesToHex, hexToBytes, type Hex } from "viem";
 import abi from "./abi.json" with { type: "json" };
 import { REASON_NAMES, S, STATE_NAMES, clients, committedSaleIdFromReceipt, isDisclosed, isTerminal, saleIdFromCommittedLogs, send, sleep, txLink } from "./chain.ts";
-import { BUYER_RUNS, BUYER_THRESHOLD, CHAIN, DEMO_STEP_MS, HI, LO, MARKET_ADDRESS, POLL_MS, ROLES, claimIsSupported, type Role } from "./config.ts";
+import { BUYER_RUNS, BUYER_THRESHOLD, CHAIN, HI, LO, MARKET_ADDRESS, POLL_MS, ROLES, claimIsSupported, type Role } from "./config.ts";
 import { canonicalPair, commitHash, envelope, randomBytesHex, randomSalt, seal, stringToBytes } from "./crypto.ts";
 import { logger } from "./log.ts";
-import { modelIsWrong } from "./model.ts";
+import { apiRefused, modelIsWrong } from "./model.ts";
+import { pace } from "./pace.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(`--${name}`);
@@ -81,21 +82,24 @@ async function recoverSaleId(m: Material): Promise<bigint | null> {
   return saleIdFromCommittedLogs(logs as any, m.commitHash);
 }
 
-// ---- hunting
+// ---- hunting. The budget counts pairs the model answered: a failed call is not a try and spends none of it, so a
+// flaky API never reads as a hunt that found nothing, and one that refuses outright stops the hunt (see hunt()).
 const budget = Number(opt("budget", "40"));
+if (!Number.isInteger(budget) || budget < 1) usage();
 let probesLeft = budget;
+let tries = 0; // pairs answered since the last one kept; it survives a failed call, so "after N tries" counts them all
 
 async function findPair(): Promise<{ a: number; b: number } | null> {
-  for (let tries = 1; probesLeft > 0; tries++) {
-    probesLeft--;
+  while (probesLeft > 0) {
     const a = rnd(), b = rnd();
-    const r = await modelIsWrong(a, b, BUYER_RUNS, BUYER_THRESHOLD);
+    const r = await modelIsWrong(a, b, BUYER_RUNS, BUYER_THRESHOLD); // an API failure throws here, before anything is counted
+    probesLeft--; tries++;
     log("probe", { a, b, wrong: r.wrong, malformed: r.malformed, runs: r.runs, truth: r.truth, answers: r.answers, tries, probesLeft });
     if (attack === "plant") {
-      if (r.wrong === 0 && r.malformed === 0) { log("attack plant: planting a pair the model gets right", { a, b }); return { a, b }; }
+      if (r.wrong === 0 && r.malformed === 0) { log("attack plant: planting a pair the model gets right", { a, b }); tries = 0; return { a, b }; }
       continue;
     }
-    if (r.verdict) { log("counterexample found", { a, b, tries }); return { a, b }; }
+    if (r.verdict) { log("counterexample found", { a, b, tries }); tries = 0; return { a, b }; }
   }
   log("probe budget exhausted, no more sales this hunt", { budget });
   return null;
@@ -108,6 +112,9 @@ async function commitOne(claimId: bigint, buyerPubKey: Hex, a: number, b: number
   const sealed = seal(envelope(hexToBytes(plaintext), salt), hexToBytes(buyerPubKey));
   // The reviewer's attack: a real commitment, then random bytes of a real ciphertext's length.
   const ciphertext = attack === "garbage" ? randomBytesHex(hexToBytes(sealed.ciphertext).length) : sealed.ciphertext;
+  // Demo pacing (pace.ts), held before the bond and the block are read and the material is persisted: a presenter
+  // who waits minutes still records the block just before the send, and nothing is persisted for an unsent commit.
+  await pace(role, "commit", { claimId, hash: hash.slice(0, 10) }, { sleep: false });
   const bond = await market.read.bondFor([claimId]) as bigint;
   const since = await publicClient.getBlock();
   mine[hash] = {
@@ -158,15 +165,15 @@ async function tick(startup = false): Promise<number> {
     open++;
     if (s.state === S.Committed) {
       if (revealWindow !== null && now > BigInt(s.committedAt) + revealWindow) continue; // the sweep will expire it
-      if (DEMO_STEP_MS) await sleep(DEMO_STEP_MS); // demo pacing, see config.ts
+      await pace(role, "reveal", { saleId }); // demo pacing, see pace.ts
       const rr = await send(publicClient, market.write.reveal([saleId, m.ciphertext]));
       log(m.attack === "garbage" ? "attack garbage: revealed random bytes instead of the sealed envelope" : "revealed",
         { saleId, bytes: hexToBytes(m.ciphertext).length, tx: txLink(rr.transactionHash) });
     } else if (s.state === S.Disputed && !isDisclosed(s)) {
-      if (DEMO_STEP_MS) await sleep(DEMO_STEP_MS); // demo pacing, see config.ts
+      const reason = REASON_NAMES[s.disputeReason as number] ?? s.disputeReason;
+      await pace(role, "disclose", { saleId, reason }); // demo pacing, see pace.ts
       const rc = await send(publicClient, market.write.disclose([saleId, m.plaintext, m.salt, m.ephemeralSecret]));
-      log("disputed by buyer, disclosed plaintext, salt and ephemeral secret on-chain",
-        { saleId, reason: REASON_NAMES[s.disputeReason as number] ?? s.disputeReason, tx: txLink(rc.transactionHash) });
+      log("disputed by buyer, disclosed plaintext, salt and ephemeral secret on-chain", { saleId, reason, tx: txLink(rc.transactionHash) });
     }
   }
   return open;
@@ -201,6 +208,9 @@ async function hunt() {
         sold++;
         await tick(); // reveals what was just committed; persisted material makes a retry safe
       } catch (e) {
+        // A refusal (no usable key, no credit, an unknown model) would fail every call after it the same way, so the
+        // hunt stops and says so. Anything else, a timeout, a 429, a 5xx or a flaky RPC, is tried again.
+        if (apiRefused(e)) { log("the model API refused the call, stopping the hunt", { error: errText(e) }); break; }
         log("sell loop failed, retrying", { error: errText(e) });
         await sleep(POLL_MS);
       }

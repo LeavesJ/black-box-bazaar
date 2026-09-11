@@ -1,7 +1,7 @@
 // agents/test/model.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CLIENT_OPTIONS, classifyReply, modelIsWrong, parseInteger, type Ask } from "../src/model.ts";
+import { CLIENT_OPTIONS, apiRefused, classifyReply, modelIsWrong, parseInteger, type Ask } from "../src/model.ts";
 
 test("classifyReply accepts a bare integer, with thousands commas, one trailing period, whitespace, or a sign", () => {
   assert.deepEqual(classifyReply("517430"), { kind: "answer", value: 517430n });
@@ -75,4 +75,19 @@ test("modelIsWrong: a timeout or API error throws and never counts as malformed"
     return true;
   });
   assert.equal(calls, 2, "the run stops at the failure; nothing after it is asked");
+});
+
+test("apiRefused: a failed model call no retry can fix (no key, 400, 401, 403, 404), and nothing else", async () => {
+  const thrown = async (err: unknown) => {
+    try { await modelIsWrong(590, 877, 3, 2, async () => { throw err; }); } catch (e) { return e; }
+    throw new Error("modelIsWrong did not throw");
+  };
+  const api = (status: number) => Object.assign(new Error(`${status} {"type":"error"}`), { status });
+  for (const s of [400, 401, 403, 404]) assert.equal(apiRefused(await thrown(api(s))), true, `status ${s}`);
+  assert.equal(apiRefused(await thrown(new Error("Could not resolve authentication method. Expected either apiKey or authToken to be set."))), true, "no key at all");
+  for (const s of [408, 429, 500, 529]) assert.equal(apiRefused(await thrown(api(s))), false, `status ${s} may pass next time`);
+  assert.equal(apiRefused(await thrown(new Error("Request timed out."))), false, "a timeout");
+  assert.equal(apiRefused(await thrown(new Error("Connection error."))), false, "a dropped connection");
+  assert.equal(apiRefused(Object.assign(new Error("HTTP request failed. Status: 404"), { status: 404 })), false, "a failed RPC is not a model call");
+  assert.equal(apiRefused("401"), false, "not an error at all");
 });

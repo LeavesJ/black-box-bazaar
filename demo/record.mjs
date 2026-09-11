@@ -155,7 +155,7 @@ if (CHECK) {
   await page.waitForTimeout(300);
   await focusOn(await selectorFor(line.focus), await colorOf(line.color), line.label, false);   // re-place the tag after the scroll
   await shot("");
-  const zero = { ...blank, caption: "The market is empty. The arbiter is watching. The sweep runs on the deployer wallet.", note: "Every count on screen is read from the chain as it happens.", color: "grey" };
+  const zero = { ...blank, caption: "The market is empty. The arbiter is watching. The sweep runs on the deployer wallet.", note: "Every count on screen is read from the chain, or from the agents' own logs, as it happens.", color: "grey" };
   await apply(zero, false); await focusOn("", "", "", false);
   await page.waitForTimeout(200);
   await shot("scene0");

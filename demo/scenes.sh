@@ -38,11 +38,6 @@ AGENTS="$ROOT/agents"
 LOGS="${LOGS_DIR:-$HERE/logs}"; export LOG_DIR="$LOGS"   # the agents write logs/<role>.log here (agents/src/log.ts)
 SCENE="${SCENE_FILE:-$HERE/scene.txt}"
 TIMELINE="${TIMELINE_FILE:-$HERE/timeline.json}"
-# The presenter (demo/console.mjs): with PRESENT=1 the run holds before each scene until go.<n> appears under
-# PRESENT_DIR, and status.json there says which scene is waiting, running, and done.
-PRESENT="${PRESENT:-0}"
-PRESENT_DIR="${PRESENT_DIR:-$HERE/out/present}"
-PRESENT_DONE=""
 DEPLOYMENT="$ROOT/docs/deployment.json"
 MIN_DWELL="${MIN_DWELL:-7}"   # seconds a caption stays up before the next line may replace it
 TITLE_S="${TITLE_S:-3.5}"     # seconds a title card covers the page (record.mjs TITLE_MS; keep them equal)
@@ -131,25 +126,6 @@ hold = float(hold) + (float(title_s) if title and caption else 0.0)
 print(now + hold)
 PY
 )"
-}
-# present_status <waiting> <running>: the presenter's view of this run; a no-op unless PRESENT=1.
-present_status() {
-  [ "$PRESENT" = 1 ] || return 0
-  printf '{"waiting": %s, "running": %s, "done": [%s]}\n' "${1:-null}" "${2:-null}" "$PRESENT_DONE" > "$PRESENT_DIR/status.json"
-}
-# gate <scene>: with PRESENT=1, hold here until the presenter's Run button for this scene is pressed.
-gate() {
-  [ "$PRESENT" = 1 ] || return 0
-  present_status "$1" null
-  log "[present] holding before scene $1 until $PRESENT_DIR/go.$1 appears"
-  until [ -f "$PRESENT_DIR/go.$1" ]; do sleep 0.5; done
-  present_status null "$1"
-}
-# scene_done <scene>: the scene is over; the presenter may offer the next.
-scene_done() {
-  [ "$PRESENT" = 1 ] || return 0
-  PRESENT_DONE="${PRESENT_DONE:+$PRESENT_DONE, }$1"
-  present_status null null
 }
 # caption <scene> <step> <color> <focus> <label> <text> [note]: one narrated step, held MIN_DWELL.
 caption() {
@@ -362,14 +338,30 @@ if [ "$C0" != 0 ] || [ "$S0" != 0 ]; then
 fi
 ADJ_WINDOW="$(window adjudicationWindow)"
 log "market $MARKET_ADDRESS on $CHAIN via $RPC_URL · $C0 claims, $S0 sales · adjudication window ${ADJ_WINDOW}s"
+# On a fresh local chain no sale exists yet, so seller material filed under this chain and address (left by a presenter
+# run or an earlier recording at the same deterministic address) is stale, and a seller would try to reveal it.
+if [ "$CHAIN" = "anvil" ] && [ "$C0" = 0 ] && [ "$S0" = 0 ]; then
+  python3 - "$AGENTS/.state" "31337:$(lower "$MARKET_ADDRESS")" <<'PY'
+import glob, json, os, sys
+d, ns = sys.argv[1], sys.argv[2]
+for f in glob.glob(os.path.join(d, "*.json")):
+    try:
+        data = json.load(open(f))
+    except ValueError:
+        continue
+    if ns in data:
+        data.pop(ns)
+        json.dump(data, open(f, "w"), indent=2)
+        print(f"cleared stale seller material for {ns} in {os.path.basename(f)}", file=sys.stderr)
+PY
+fi
 
 run_bg arbiter arbiter -- watch --seconds 900
 run_bg sweep sweep -- --seconds 900
 card 0 "Black Box Bazaar" "A market where agents sell counterexamples the buyer cannot see until its money is in escrow."
-caption 0 "" grey "" "" "The market is $( [ "$C0" = 0 ] && [ "$S0" = 0 ] && echo empty || echo "not empty: $(onchain_phrase "$C0" "$S0")" ). The arbiter is watching. The sweep runs on the deployer wallet." "Every count on screen is read from the chain as it happens."
+caption 0 "" grey "" "" "The market is $( [ "$C0" = 0 ] && [ "$S0" = 0 ] && echo empty || echo "not empty: $(onchain_phrase "$C0" "$S0")" ). The arbiter is watching. The sweep runs on the deployer wallet." "Every count on screen is read from the chain, or from the agents' own logs, as it happens."
 
 # Scene 1 — honest sale, on the seller wallet. The claim is posted before the card, so the card lifts onto its caption.
-gate 1
 wait_dwell
 CLAIM_A="$(post_claim)"; [ -n "$CLAIM_A" ] || die "no CLAIM_ID from buyer post"
 card 1 "Scene 1 · An honest sale" "The buyer posts a claim. The seller finds a counterexample. The buyer checks it and pays."
@@ -385,12 +377,10 @@ wait_revealed "$S1" 120
 caption 1 reveal green "sale:$S1" "SALE #$S1" "The seller reveals the pair, encrypted to the buyer's key. Only the buyer can read it."
 wait_state "$S1" "$ST_CONFIRMED" 240
 caption 1 adjudicate blue "sale:$S1" "SALE #$S1" "The buyer decrypts it, checks the hash, and $(runs_phrase buyer "$S1" '^re-run result$' "the model"). $(tally_phrase buyer "$S1" '^re-run result$' fails) Confirmed."
-caption 1 settle green "addr:$SELLER_ADDR" "SELLER'S CARD" "The seller is paid and its bond comes back. Its card reads $(headline_for "$SELLER_ADDR")." "Confirmed means the buyer checked. That is the only way this number moves."
-scene_done 1
+caption 1 settle green "addr:$SELLER_ADDR" "SELLER'S CARD" "The seller is paid and its bond comes back. Its card reads $(headline_for "$SELLER_ADDR")." "Confirmed means someone checked: the buyer here, or the arbiter on a dispute. Silence never moves it."
 
 # Scene 2 — planted pair, on the rogue wallet. The hunt starts under scene 1's last caption, so its sale is usually
 # on-chain when the card lifts, and the commit caption has a sale card to point at.
-gate 2
 N0="$(sale_count)"
 ROGUE_ADDR="$(role_address rogue)"; [ -n "$ROGUE_ADDR" ] || die "the agents' wallet table names no rogue wallet (npm run -s wallets -- balances)"
 run_bg rogue seller -- hunt --claim "$CLAIM_A" --max 1 --role rogue --attack plant --seconds 600
@@ -407,10 +397,8 @@ caption 2 dispute red "sale:$S2" "SALE #$S2" "The rogue must disclose the pair o
 wait_state "$S2" "$ST_REFUTED" 240
 caption 2 rule purple "sale:$S2" "ARBITER" "The arbiter $(runs_phrase arbiter "$S2" '^ruling$' "it" "$(config_const ARBITER_RUNS)"). $(tally_phrase arbiter "$S2" '^ruling$' right) $(state_name "$(sale_state "$S2")")."
 caption 2 settle red "addr:$ROGUE_ADDR" "ROGUE'S CARD" "The rogue's bond goes to the buyer. Its card reads $(headline_for "$ROGUE_ADDR")." "A refutation stays on the record."
-scene_done 2
 
 # Scene 3 — garbage reveal, on the newcomer wallet. The hunt starts under scene 2's last caption, as in scene 2.
-gate 3
 N0="$(sale_count)"
 NEWCOMER_ADDR="$(role_address newcomer)"; [ -n "$NEWCOMER_ADDR" ] || die "the agents' wallet table names no newcomer wallet (npm run -s wallets -- balances)"
 run_bg newcomer seller -- hunt --claim "$CLAIM_A" --max 1 --role newcomer --attack garbage --seconds 600
@@ -427,11 +415,9 @@ caption 3 dispute orange "sale:$S3" "SALE #$S3" "The newcomer discloses the real
 wait_state "$S3" "$ST_REFUTED" 240
 caption 3 rule purple "sale:$S3" "ARBITER" "The arbiter checks delivery first: does that key reproduce the posted reveal? No. $(state_name "$(sale_state "$S3")"), without running the model." "A real counterexample that was never delivered earns nothing."
 caption 3 settle orange "addr:$NEWCOMER_ADDR" "NEWCOMER'S CARD" "The newcomer loses its bond. Its card reads $(headline_for "$NEWCOMER_ADDR")."
-scene_done 3
 
 # Scene 4 — silent buyer, sold by the quiet wallet. Its headline is read before the sale and must be "no history".
 # The claim is posted before the card, as in scene 1.
-gate 4
 CLAIM_B="$(post_claim)"; [ -n "$CLAIM_B" ] || die "no CLAIM_ID from second buyer post"
 card 4 "Scene 4 · The silent buyer" "A sale the buyer never checks."
 caption 4 claim blue "claim:$CLAIM_B" "CLAIM #$CLAIM_B" "The buyer posts a second claim. This time nobody is watching it."
@@ -461,7 +447,6 @@ C_SELLER_AFTER="$(seller_confirmed "$SELLER_ADDR")"
 [ "$C_SELLER_AFTER" = "$C_SELLER_BEFORE" ] || die "the honest seller's confirmed count moved from $C_SELLER_BEFORE to $C_SELLER_AFTER during a sale it never made"
 caption 4 settle amber "sale:$S4" "SALE #$S4" "Anyone can settle. The quiet wallet is paid. But the sale is recorded as $(lower "$(state_name "$(sale_state "$S4")")")."
 caption 4 settle grey "addr:$QUIET_ADDR" "QUIET WALLET'S CARD" "The quiet wallet's card reads $(headline_for "$QUIET_ADDR"): $(seller_unadjudicated "$QUIET_ADDR") unadjudicated, $(seller_confirmed "$QUIET_ADDR") confirmed. Money followed the default. Reputation did not." "Silence is not evidence."
-scene_done 4
 
 # Epilogue: with EPILOGUE=1 the live page, its sales counted from the deployment docs/deployment.json names; then a
 # final card that the recorder keeps up until END stops it (its card_s outlives its hold), so the video ends on it.

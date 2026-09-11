@@ -1,10 +1,11 @@
 // agents/src/buyer.ts
 import { bytesToHex, parseEther, type Hex } from "viem";
 import { REASON, REASON_NAMES, S, type Windows, clients, eventFromReceipt, isTerminal, isTerminalRevert, keepTrying, readWindows, send, sleep, txLink } from "./chain.ts";
-import { BOUNTY_ETH, BUYER_RUNS, BUYER_THRESHOLD, CLAIM_DURATION, DEMO_STEP_MS, HI, LO, MAX_HITS, POLL_MS, SUPPORTED_SPEC, claimIsSupported, keyFor } from "./config.ts";
+import { BOUNTY_ETH, BUYER_RUNS, BUYER_THRESHOLD, CLAIM_DURATION, HI, LO, MAX_HITS, POLL_MS, SUPPORTED_SPEC, claimIsSupported, keyFor } from "./config.ts";
 import { boxKeypairFromEthKey, commitHash, open, parsePair, splitEnvelope } from "./crypto.ts";
 import { logger } from "./log.ts";
 import { modelIsWrong } from "./model.ts";
+import { pace } from "./pace.ts";
 
 const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(`--${name}`);
@@ -51,7 +52,9 @@ async function decide(saleId: bigint, claimId: bigint, ciphertext: Hex, commit: 
 }
 
 async function act(saleId: bigint, claimId: bigint, d: Decision) {
-  if (DEMO_STEP_MS) await sleep(DEMO_STEP_MS); // demo pacing, see config.ts: before the confirm or the dispute
+  // Demo pacing (pace.ts), before the confirm or the dispute. The verdict came from the reveal, which cannot change
+  // while this waits, and the bond is read after it.
+  await pace("buyer", d.act, { saleId, claimId, ...(d.act === "dispute" ? { reason: REASON_NAMES[d.reason] } : {}) });
   if (d.act === "confirm") {
     const receipt = await send(publicClient, market.write.confirm([saleId]));
     log("confirmed", { saleId, tx: txLink(receipt.transactionHash) });

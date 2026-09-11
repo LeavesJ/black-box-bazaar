@@ -116,13 +116,25 @@ One trap: `cast` and `forge` load the repository's `.env` on their own, so once 
 
 ### Present it live
 
-For a walkthrough in front of people, one command:
+For a walkthrough in front of people, at your own pace, one command:
 
 ```
 node demo/console.mjs
 ```
 
-It starts a fresh local chain, deploys the market on it, serves the page with a presenter panel at http://localhost:8082/?present=1, and starts the four scenes held at a gate before each one. The panel lists the procedure. Press **Run scene 1**, narrate from the panel's *Say* notes while the same captions, callouts and step tracker as the video play live over the page, then **Run scene 2**, and so on. **Reset chain** starts over from an empty market; Ctrl-C in the terminal stops everything. Nothing touches the testnet or any committed file: the page is served from a scratch copy under `demo/out/present/`. Each scene makes real model calls, so the four take about five minutes. Needs Foundry, Node 26, `agents/node_modules` and `ANTHROPIC_API_KEY` in `.env`.
+It starts a fresh local chain, deploys the market on it with every window at one hour (`PRESENT_WINDOW`, in seconds), starts the arbiter and the sweep, and opens http://localhost:8082/?present=1. The page is a deck: slides on the problem and the mechanism, a title card for each of the four scenes, one live step for each on-chain moment of a scene, shown on the real market page with the video's caption bar, callout, step tracker and scene badge, and closing slides on the four answers.
+
+Walk it with the large ◀ and ▶ buttons at the bottom of the right column, or the keyboard: → Space PageDown Enter go forward, ← PageUp go back, **N** shows or hides the notes.
+
+- **▶ on a live step does at most one thing**: post a claim, start an agent, release one agent's next transaction, or jump the local clock. Some steps release nothing: they show what an agent has already decided, or a wallet's record. The step shows a working indicator until the chain shows the result, then ▶ comes back. Every agent stops before each transaction and waits for you, so nothing happens on-chain between presses. The agents still decide what to do (confirm or dispute, how to rule); you decide when. Nothing advances on a timer, so the time is yours: talk as long as you like on any step. Every contract window is an hour, far longer than any step needs.
+- **◀ walks back** through what was already shown, without undoing anything. ▶ from there walks forward through that history, and at the newest step it runs the next one.
+- **Notes**: the top of the right column says what to say for the step on screen and what the next ▶ will do. The agents' own logs run below it.
+- **Retry**: a step that waits too long (four minutes, eight for a hunt) turns red, naming what it waited for and quoting the problem the agent last logged. Retry waits again with a fresh timeout; an action that already went through is never repeated. If the agent the step waits on has stopped, Retry starts it again when that cannot send anything you did not release (a hunting seller, the buyer, the arbiter, the sweep); for a seller that already holds a sale it says so instead, and Reset chain starts over.
+- **Reset chain**, in the notes header, asks first, then stops everything and starts over from an empty market at the title slide. Ctrl-C in the terminal stops everything.
+
+The model calls happen while the agents hunt and check: a hunting seller asks the model random pairs until one is wrong, the buyer re-runs a reveal three times, and the arbiter re-runs a dispute five times, each before it stops at its gate. A hunt or a check can therefore take a while after you press ▶; a release lands within a block or two.
+
+Nothing touches the testnet or any committed file: the page is served from a scratch copy under `demo/out/present/`, with the agents' logs and gate files beside it. Needs Foundry, Node 26, `agents/node_modules` and `ANTHROPIC_API_KEY` in `.env`; each boot makes one model call to check the key, so a missing or refused one shows in the notes before the talk rather than at the first hunt. Ports: `PRESENT_PORT` (8082) and `PRESENT_ANVIL_PORT` (8546). One console at a time: running the command again while one is up exits at once and leaves the running one alone.
 
 ## Where the ideas came from
 

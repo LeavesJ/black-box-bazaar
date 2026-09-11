@@ -64,3 +64,13 @@ export async function modelIsWrong(a: number, b: number, runs: number, threshold
   }
   return { wrong, malformed, runs, verdict: wrong >= threshold, answers, truth: truth.toString() };
 }
+
+/// Whether modelIsWrong's failure will fail the same way however often it is tried: no key at all (the SDK's "Could
+/// not resolve authentication method"), a key the API rejects (401, 403), a request it refuses outright such as an
+/// exhausted credit balance (400), or a model it does not serve (404). A timeout, a dropped connection, a 429 or a
+/// 5xx may pass on the next try, and so may any error that is not a failed model call.
+export function apiRefused(e: unknown): boolean {
+  if (!(e instanceof Error) || !e.message.startsWith("model call failed")) return false;
+  const cause = e.cause as { status?: unknown; message?: unknown } | undefined;
+  return [400, 401, 403, 404].includes(Number(cause?.status)) || /Could not resolve authentication method/.test(String(cause?.message ?? ""));
+}

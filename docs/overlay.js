@@ -25,6 +25,7 @@
   const FOCUS_PAD = 12;         // px between the top strip and a focused card's callout
   const TITLE_MS = 3500;        // how long a title card covers the page (scenes.sh TITLE_S; keep them equal)
   const FOCUS_WAIT_MS = 20000;  // how long a caller keeps looking for a focused card the page has not rendered yet
+  const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "Home", "End"]);   // the keys that hand scrolling back to the person
   // The pair is private until a dispute discloses it: the sellers hold it, and the buyer reads it once it is
   // revealed. Their lines never show it. The arbiter's do: it only ever sees a pair already disclosed on-chain.
   const PRIVATE_ROLES = new Set(["seller", "rogue", "newcomer", "quiet", "buyer"]);
@@ -91,8 +92,11 @@
     new MutationObserver(schedule).observe(document.querySelector("main") || document.body, { childList: true, subtree: true, characterData: true });
     addEventListener("scroll", schedule, { passive: true });
     addEventListener("resize", schedule);
-    // A person scrolling (the presenter) takes over from the anchor.
-    for (const ev of ["wheel", "touchmove", "keydown"]) addEventListener(ev, () => { focus.anchor = null; }, { passive: true });
+    // A person scrolling takes over from the anchor: the wheel, a touch, or a key that scrolls. The presenter's own
+    // keys (→ ← Space PageUp PageDown Enter N) never scroll the page (present.js takes them), so pressing ▶ keeps
+    // the callout where focusOn put it.
+    for (const ev of ["wheel", "touchmove"]) addEventListener(ev, () => { focus.anchor = null; }, { passive: true });
+    addEventListener("keydown", (e) => { if (SCROLL_KEYS.has(e.key)) focus.anchor = null; }, { passive: true });
   }
 
   // Everything the badge, tracker, caption bar and title card show for one scene line. The badge and tracker are
