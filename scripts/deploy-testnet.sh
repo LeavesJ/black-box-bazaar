@@ -14,7 +14,7 @@ echo "deployer $DEPLOYER_ADDRESS balance $(cast from-wei "$bal") ETH"
 grep -q '^CHAIN=base-sepolia' .env || printf 'CHAIN=base-sepolia\n' >> .env
 if ! grep -q '^BUYER_KEY=' .env; then (cd agents && npm run -s wallets -- gen); fi
 set -a; . ./.env; set +a
-(cd agents && npm run -s wallets -- fund "${FUND_EACH:-0.01}")
+(cd agents && npm run -s wallets -- fund "${FUND_EACH:-0.004}")
 W="${WINDOW:-60}"
 ARBITER_ADDRESS="$ARBITER_ADDRESS" REVEAL_WINDOW="$W" ADJUDICATION_WINDOW="$W" DISCLOSURE_WINDOW="$W" ARBITRATION_WINDOW="$W" \
   forge script script/Deploy.s.sol --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" --broadcast 2>&1 | grep -E 'MARKET_ADDRESS|ONCHAIN|Error' || true
