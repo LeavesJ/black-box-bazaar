@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.foundry/bin:$PATH"
 ADDR="${1:?address}"; CHAIN="${2:?chainId}"; BLOCK="${3:?deployedBlock}"
-forge build >/dev/null
+forge build >/dev/null 2>&1
 mkdir -p agents/src docs
 python3 - "$ADDR" "$CHAIN" "$BLOCK" <<'PY'
 import json, sys
