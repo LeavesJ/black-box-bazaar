@@ -244,6 +244,24 @@ contract RefutationMarketTest is Test {
         assertEq(s.disclosedAt, uint64(block.timestamp));
     }
 
+    function test_disclose_rejectsEmptyPlaintext() public {
+        // an empty commitment must be undisclosable rather than a fake disclosure
+        uint256 cid = _post();
+        bytes32 h = keccak256(abi.encode(cid, bytes(""), SALT));
+        uint256 bond = m.bondFor(cid);
+        vm.prank(seller);
+        uint256 sid = m.commit{value: bond}(cid, h);
+        _reveal(sid);
+        _dispute(sid);
+        vm.prank(seller);
+        vm.expectRevert(RefutationMarket.ZeroArgument.selector);
+        m.disclose(sid, bytes(""), SALT, EPH);
+        // and after the disclosure window it withdraws as undisclosed
+        vm.warp(block.timestamp + DISC + 1);
+        m.withdrawSale(sid);
+        assertEq(uint8(_state(sid)), uint8(RefutationMarket.SaleState.Withdrawn));
+    }
+
     function test_disclose_revertsWhenRepeated() public {
         (, uint256 sid) = _disclosedSale();
         vm.prank(seller);
@@ -423,5 +441,95 @@ contract RefutationMarketTest is Test {
         bytes memory pt = hex"7b2261223a3132332c2262223a3435367d";
         bytes32 salt = 0x1111111111111111111111111111111111111111111111111111111111111111;
         assertEq(keccak256(abi.encode(uint256(1), pt, salt)), 0xe42ef964f458bf6a7f29035d0d681389f65fe8e1462a4346c7ee63f087a9f67f);
+    }
+}
+
+/// A seller that refuses ETH while `accepting` is false. Used to prove that no
+/// transition can be reverted by a recipient, and that deferred pay is withdrawable.
+contract ToggleSeller {
+    bool public accepting;
+    function setAccepting(bool v) external { accepting = v; }
+    receive() external payable { require(accepting, "no"); }
+    function commit(RefutationMarket m, uint256 claimId, bytes32 h) external payable returns (uint256) {
+        return m.commit{value: msg.value}(claimId, h);
+    }
+    function reveal(RefutationMarket m, uint256 saleId, bytes calldata ct) external { m.reveal(saleId, ct); }
+    function withdraw(RefutationMarket m) external { m.withdraw(); }
+}
+
+contract RefutationMarketPaymentTest is Test {
+    RefutationMarket m;
+    ToggleSeller ts;
+    address buyer = address(0xB0B);
+    address arbiter = address(0xA4B);
+    uint256 constant BOUNTY = 0.0005 ether;
+    bytes PT = bytes('{"a":123,"b":456}');
+    bytes32 constant SALT = bytes32(uint256(0x22));
+
+    function setUp() public {
+        m = new RefutationMarket(arbiter, 90, 90, 90, 90, 2000);
+        ts = new ToggleSeller();
+        vm.deal(buyer, 1 ether);
+        vm.deal(address(ts), 1 ether);
+    }
+
+    function _revealedByContract() internal returns (uint256 cid, uint256 sid) {
+        vm.prank(buyer);
+        cid = m.postClaim{value: BOUNTY * 3}("model", "spec", bytes32(uint256(1)), BOUNTY, 3, 1 hours);
+        uint256 bond = m.bondFor(cid);
+        bytes32 h = keccak256(abi.encode(cid, PT, SALT));
+        sid = ts.commit{value: bond}(m, cid, h);
+        ts.reveal(m, sid, hex"01");
+    }
+
+    function test_confirm_neverRevertsOnRejectingSeller_paymentDeferred() public {
+        (uint256 cid, uint256 sid) = _revealedByContract();
+        ts.setAccepting(false);
+        vm.prank(buyer);
+        m.confirm(sid);
+        assertEq(uint8(m.getSale(sid).state), uint8(RefutationMarket.SaleState.Confirmed));
+        assertEq(m.owed(address(ts)), BOUNTY + m.bondFor(cid));
+        assertEq(m.getClaim(cid).pending, 0);
+        // and the claim can still be closed: escrow is never locked by a recipient
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(buyer);
+        m.closeClaim(cid);
+        assertTrue(m.getClaim(cid).closed);
+    }
+
+    function test_settle_neverRevertsOnRejectingSeller() public {
+        (uint256 cid, uint256 sid) = _revealedByContract();
+        ts.setAccepting(false);
+        vm.warp(block.timestamp + 91);
+        m.settle(sid);
+        assertEq(uint8(m.getSale(sid).state), uint8(RefutationMarket.SaleState.Unadjudicated));
+        assertEq(m.owed(address(ts)), BOUNTY + m.bondFor(cid));
+    }
+
+    function test_withdraw_paysDeferredAndZeroes() public {
+        (uint256 cid, uint256 sid) = _revealedByContract();
+        ts.setAccepting(false);
+        vm.prank(buyer);
+        m.confirm(sid);
+        uint256 before = address(ts).balance;
+        ts.setAccepting(true);
+        ts.withdraw(m);
+        assertEq(address(ts).balance, before + BOUNTY + m.bondFor(cid));
+        assertEq(m.owed(address(ts)), 0);
+    }
+
+    function test_withdraw_revertsWhenNothingOwed() public {
+        vm.expectRevert(RefutationMarket.NothingOwed.selector);
+        m.withdraw();
+    }
+
+    function test_directPayLeavesNothingOwed() public {
+        (uint256 cid, uint256 sid) = _revealedByContract();
+        ts.setAccepting(true);
+        uint256 before = address(ts).balance;
+        vm.prank(buyer);
+        m.confirm(sid);
+        assertEq(address(ts).balance, before + BOUNTY + m.bondFor(cid));
+        assertEq(m.owed(address(ts)), 0);
     }
 }

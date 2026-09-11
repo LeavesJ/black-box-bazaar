@@ -66,6 +66,9 @@ contract RefutationMarket {
     Sale[] private _sales;
     mapping(address => Rep) public rep;
     mapping(uint256 => mapping(bytes32 => bool)) public commitUsed;
+    /// @notice Payments a recipient refused at transition time. A transition never
+    /// reverts because of who is being paid; the money waits here for `withdraw`.
+    mapping(address => uint256) public owed;
 
     event ClaimPosted(uint256 indexed claimId, address indexed buyer, string modelId, string spec, bytes32 buyerPubKey, uint256 bounty, uint32 maxHits, uint64 expiresAt);
     event Committed(uint256 indexed saleId, uint256 indexed claimId, address indexed seller, bytes32 commitHash, uint256 bond);
@@ -78,6 +81,8 @@ contract RefutationMarket {
     event Settled(uint256 indexed saleId, uint256 indexed claimId);
     event Withdrawn(uint256 indexed saleId, uint256 indexed claimId, string reason);
     event ClaimClosed(uint256 indexed claimId, uint256 refunded);
+    event PaymentDeferred(address indexed to, uint256 amount);
+    event Paid(address indexed to, uint256 amount);
 
     error WrongValue(uint256 expected, uint256 got);
     error NotBuyer();
@@ -96,6 +101,7 @@ contract RefutationMarket {
     error ClaimNotExpired();
     error ZeroArgument();
     error TransferFailed();
+    error NothingOwed();
 
     constructor(address _arbiter, uint64 _revealWindow, uint64 _adjudicationWindow, uint64 _disclosureWindow, uint64 _arbitrationWindow, uint256 _bondBps) {
         if (_arbiter == address(0) || _revealWindow == 0 || _adjudicationWindow == 0 || _disclosureWindow == 0 || _arbitrationWindow == 0) revert ZeroArgument();
@@ -202,7 +208,8 @@ contract RefutationMarket {
         Sale storage s = _sales[saleId];
         if (msg.sender != s.seller) revert NotSeller();
         _requireState(s, SaleState.Disputed);
-        if (s.plaintext.length != 0) revert AlreadyDisclosed();
+        if (s.disclosedAt != 0) revert AlreadyDisclosed();
+        if (plaintext.length == 0) revert ZeroArgument();
         if (block.timestamp > s.disputedAt + disclosureWindow) revert WindowClosed();
         if (keccak256(abi.encode(s.claimId, plaintext, salt)) != s.commitHash) revert HashMismatch();
         s.plaintext = plaintext;
@@ -217,7 +224,7 @@ contract RefutationMarket {
         Sale storage s = _sales[saleId];
         Claim storage c = _claims[s.claimId];
         _requireState(s, SaleState.Disputed);
-        if (s.plaintext.length == 0) revert NotDisclosed();
+        if (s.disclosedAt == 0) revert NotDisclosed();
         c.pending -= 1;
         emit Ruled(saleId, s.claimId, sellerWasRight);
         if (sellerWasRight) {
@@ -240,7 +247,7 @@ contract RefutationMarket {
         Sale storage s = _sales[saleId];
         Claim storage c = _claims[s.claimId];
         _requireState(s, SaleState.Disputed);
-        if (s.plaintext.length == 0) revert NotDisclosed();
+        if (s.disclosedAt == 0) revert NotDisclosed();
         if (block.timestamp <= s.disclosedAt + arbitrationWindow) revert WindowOpen();
         s.state = SaleState.Unarbitrated;
         c.pending -= 1;
@@ -255,7 +262,7 @@ contract RefutationMarket {
         Sale storage s = _sales[saleId];
         Claim storage c = _claims[s.claimId];
         _requireState(s, SaleState.Disputed);
-        if (s.plaintext.length != 0) revert AlreadyDisclosed();
+        if (s.disclosedAt != 0) revert AlreadyDisclosed();
         if (block.timestamp <= s.disputedAt + disclosureWindow) revert WindowOpen();
         s.state = SaleState.Withdrawn;
         c.pending -= 1;
@@ -307,8 +314,24 @@ contract RefutationMarket {
         if (s.state != expected) revert WrongState(expected, s.state);
     }
 
-    function _pay(address to, uint256 amount) internal {
-        (bool ok, ) = to.call{value: amount}("");
+    /// @notice Take money a transition could not deliver to you at the time.
+    function withdraw() external {
+        uint256 amount = owed[msg.sender];
+        if (amount == 0) revert NothingOwed();
+        owed[msg.sender] = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
         if (!ok) revert TransferFailed();
+        emit Paid(msg.sender, amount);
+    }
+
+    /// @dev Push with a bounded stipend; a recipient that refuses is credited, never
+    /// allowed to revert the transition that pays it. State is final before this runs.
+    function _pay(address to, uint256 amount) internal {
+        if (amount == 0) return;
+        (bool ok, ) = to.call{value: amount, gas: 50_000}("");
+        if (!ok) {
+            owed[to] += amount;
+            emit PaymentDeferred(to, amount);
+        }
     }
 }

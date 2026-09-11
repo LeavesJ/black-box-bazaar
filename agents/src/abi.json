@@ -23,6 +23,11 @@
     "internalType": "uint64"
    },
    {
+    "name": "_arbitrationWindow",
+    "type": "uint64",
+    "internalType": "uint64"
+   },
+   {
     "name": "_bondBps",
     "type": "uint256",
     "internalType": "uint256"
@@ -52,6 +57,19 @@
     "name": "",
     "type": "address",
     "internalType": "address"
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "arbitrationWindow",
+  "inputs": [],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint64",
+    "internalType": "uint64"
    }
   ],
   "stateMutability": "view"
@@ -193,6 +211,11 @@
     "name": "salt",
     "type": "bytes32",
     "internalType": "bytes32"
+   },
+   {
+    "name": "ephemeralSecret",
+    "type": "bytes32",
+    "internalType": "bytes32"
    }
   ],
   "outputs": [],
@@ -219,6 +242,11 @@
     "name": "saleId",
     "type": "uint256",
     "internalType": "uint256"
+   },
+   {
+    "name": "reason",
+    "type": "uint8",
+    "internalType": "enum RefutationMarket.DisputeReason"
    }
   ],
   "outputs": [],
@@ -375,11 +403,50 @@
       "internalType": "bytes"
      },
      {
+      "name": "disclosedAt",
+      "type": "uint64",
+      "internalType": "uint64"
+     },
+     {
+      "name": "salt",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "ephemeralSecret",
+      "type": "bytes32",
+      "internalType": "bytes32"
+     },
+     {
+      "name": "disputeReason",
+      "type": "uint8",
+      "internalType": "enum RefutationMarket.DisputeReason"
+     },
+     {
       "name": "state",
       "type": "uint8",
       "internalType": "enum RefutationMarket.SaleState"
      }
     ]
+   }
+  ],
+  "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "owed",
+  "inputs": [
+   {
+    "name": "",
+    "type": "address",
+    "internalType": "address"
+   }
+  ],
+  "outputs": [
+   {
+    "name": "",
+    "type": "uint256",
+    "internalType": "uint256"
    }
   ],
   "stateMutability": "view"
@@ -460,6 +527,11 @@
     "internalType": "uint32"
    },
    {
+    "name": "sellerUnarbitrated",
+    "type": "uint32",
+    "internalType": "uint32"
+   },
+   {
     "name": "buyerAdjudicated",
     "type": "uint32",
     "internalType": "uint32"
@@ -476,6 +548,19 @@
    }
   ],
   "stateMutability": "view"
+ },
+ {
+  "type": "function",
+  "name": "resolveUnarbitrated",
+  "inputs": [
+   {
+    "name": "saleId",
+    "type": "uint256",
+    "internalType": "uint256"
+   }
+  ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
  },
  {
   "type": "function",
@@ -549,6 +634,13 @@
     "internalType": "uint256"
    }
   ],
+  "outputs": [],
+  "stateMutability": "nonpayable"
+ },
+ {
+  "type": "function",
+  "name": "withdraw",
+  "inputs": [],
   "outputs": [],
   "stateMutability": "nonpayable"
  },
@@ -722,6 +814,12 @@
     "type": "bytes32",
     "indexed": false,
     "internalType": "bytes32"
+   },
+   {
+    "name": "ephemeralSecret",
+    "type": "bytes32",
+    "indexed": false,
+    "internalType": "bytes32"
    }
   ],
   "anonymous": false
@@ -744,6 +842,50 @@
    },
    {
     "name": "buyerBond",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   },
+   {
+    "name": "reason",
+    "type": "uint8",
+    "indexed": false,
+    "internalType": "enum RefutationMarket.DisputeReason"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "Paid",
+  "inputs": [
+   {
+    "name": "to",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "amount",
+    "type": "uint256",
+    "indexed": false,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "PaymentDeferred",
+  "inputs": [
+   {
+    "name": "to",
+    "type": "address",
+    "indexed": true,
+    "internalType": "address"
+   },
+   {
+    "name": "amount",
     "type": "uint256",
     "indexed": false,
     "internalType": "uint256"
@@ -804,6 +946,25 @@
  {
   "type": "event",
   "name": "Settled",
+  "inputs": [
+   {
+    "name": "saleId",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   },
+   {
+    "name": "claimId",
+    "type": "uint256",
+    "indexed": true,
+    "internalType": "uint256"
+   }
+  ],
+  "anonymous": false
+ },
+ {
+  "type": "event",
+  "name": "Unarbitrated",
   "inputs": [
    {
     "name": "saleId",
@@ -898,6 +1059,11 @@
  {
   "type": "error",
   "name": "NotSeller",
+  "inputs": []
+ },
+ {
+  "type": "error",
+  "name": "NothingOwed",
   "inputs": []
  },
  {

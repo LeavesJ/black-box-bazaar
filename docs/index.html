@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Black Box Bazaar</title>
 <style>
-  :root { --bg:#0b0d10; --panel:#12161b; --line:#232a32; --text:#e6e9ec; --muted:#8a94a0; --ok:#3ddc97; --bad:#ff6b6b; --warn:#ffc857; --unk:#8a94a0; --link:#7ab8ff; }
+  :root { --bg:#0b0d10; --panel:#12161b; --line:#232a32; --text:#e6e9ec; --muted:#8a94a0; --dim:#5f6873; --ok:#3ddc97; --bad:#ff6b6b; --warn:#ffc857; --unk:#8a94a0; --link:#7ab8ff; }
   * { box-sizing:border-box }
   body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif }
   header { padding:22px 28px 10px; border-bottom:1px solid var(--line) }
@@ -15,20 +15,37 @@
   main { display:grid; grid-template-columns: 1.1fr 1.6fr .9fr; gap:16px; padding:16px 28px 40px }
   section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; min-height:120px }
   h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.8px; color:var(--muted) }
+  h3 { margin:0 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:var(--dim) }
+  .note { color:var(--muted); font-size:12px; margin:-4px 0 12px }
   .card { border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin-bottom:10px }
   .row { display:flex; justify-content:space-between; gap:10px; align-items:baseline }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px }
   .muted { color:var(--muted) }
-  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; letter-spacing:.3px; border:1px solid var(--line) }
+  .dim { color:var(--dim) }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; letter-spacing:.3px; border:1px solid var(--line); white-space:nowrap }
   .Committed { color:var(--warn) } .Revealed { color:var(--link) } .Confirmed { color:var(--ok) } .Upheld { color:var(--ok) }
   .Disputed { color:var(--warn) } .Refuted { color:var(--bad) } .Withdrawn { color:var(--bad) } .Unadjudicated { color:var(--unk) }
-  .head { font-size:22px; font-weight:700 }
+  .Unarbitrated { color:var(--dim); border-style:dashed }
+  .reason { color:var(--warn); font-size:12px }
+  .head { font-size:22px; font-weight:700; display:flex; gap:10px; align-items:baseline; flex-wrap:wrap }
   .head.ok { color:var(--ok) } .head.bad { color:var(--bad) } .head.unk { color:var(--unk) }
+  .head .adverse { font-size:13px; font-weight:600; color:var(--bad) }
   .triple { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:6px }
   .triple div { background:var(--bg); border-radius:4px; padding:6px 8px }
   .triple b { display:block; font-size:16px }
+  .small { display:grid; grid-template-columns:repeat(2,1fr); gap:6px; margin-top:6px; font-size:12px; color:var(--muted) }
+  .small div { background:var(--bg); border-radius:4px; padding:4px 8px }
+  .small b { color:var(--text); margin-right:6px }
   a { color:var(--link); text-decoration:none } a:hover { text-decoration:underline }
   .ct { word-break:break-all; color:var(--muted); font-size:11px; max-height:38px; overflow:hidden }
+  .tl { list-style:none; margin:8px 0 0; padding:6px 0 0; border-top:1px dashed var(--line); font-size:12px }
+  .tl li { display:grid; grid-template-columns: 96px 1fr auto; gap:8px; padding:1px 0 }
+  .tl .ev { font-weight:600 }
+  .tl .when { color:var(--dim) }
+  .act { list-style:none; margin:0 0 14px; padding:0; font-size:12px; border-bottom:1px solid var(--line); padding-bottom:10px }
+  .act li { display:grid; grid-template-columns: 96px 1fr auto; gap:8px; padding:2px 0 }
+  .act .ev { font-weight:600 }
+  .act .when { color:var(--dim) }
   footer { padding:0 28px 30px; color:var(--muted); font-size:12px }
   @media (max-width: 1100px) { main { grid-template-columns:1fr } }
 </style>
@@ -41,8 +58,17 @@
 </header>
 <main>
   <section><h2>Claims</h2><div id="claims"></div></section>
-  <section><h2>Sales</h2><div id="sales"></div></section>
-  <section><h2>Reputation</h2><div id="rep"></div></section>
+  <section>
+    <h2>Sales</h2>
+    <h3>Activity</h3>
+    <ul class="act" id="activity"><li class="muted">Reading events…</li></ul>
+    <div id="sales"></div>
+  </section>
+  <section>
+    <h2>Settlement history</h2>
+    <p class="note">Address-level history. A buyer and seller can be the same person; treat this as settlement history, not independent credibility.</p>
+    <div id="rep"></div>
+  </section>
 </main>
 <footer id="foot"></footer>
 <script type="module" src="./app.js"></script>

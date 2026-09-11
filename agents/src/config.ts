@@ -8,6 +8,7 @@ export const EXPLORER = CHAIN.id === 84532 ? "https://sepolia.basescan.org" : ""
 export const MARKET_ADDRESS = (process.env.MARKET_ADDRESS ?? "") as Hex;
 
 export const MODEL_ID = "claude-haiku-4-5-20251001";
+export const MAX_TOKENS = 32;
 export const PROMPT = (a: number, b: number) => `What is ${a} × ${b}? Reply with only the integer.`;
 export const LO = 100;
 export const HI = 999;
@@ -20,13 +21,27 @@ export const ARBITER_RUNS = 5;
 export const ARBITER_THRESHOLD = 3;
 export const POLL_MS = Number(process.env.POLL_MS ?? 3000);
 
+/// The one specification every agent in this tree can evaluate. It states the parser rule so a
+/// reply's classification is part of the claim, not a private convention of one agent.
 export const CLAIM_SPEC =
-  `Claim: ${MODEL_ID} at temperature 0 multiplies two three-digit integers (100..999) correctly. ` +
-  `Test: prompt "What is {a} × {b}? Reply with only the integer." and parse the last integer in the reply. ` +
-  `A counterexample is a pair {"a","b"} where the parsed integer differs from a*b in at least ${BUYER_THRESHOLD} of ${BUYER_RUNS} runs. ` +
+  `Claim: ${MODEL_ID} at temperature 0 with max_tokens ${MAX_TOKENS} multiplies two three-digit integers correctly. ` +
+  `Domain: a and b are integers in ${LO}..${HI}; a counterexample is the canonical JSON {"a":A,"b":B} with no whitespace. ` +
+  `Test: prompt "What is {a} × {b}? Reply with only the integer." ` +
+  `Parse rule: trim the reply, strip one trailing period, remove commas; the remainder must match ^-?[0-9]+$ in full, ` +
+  `otherwise the reply is malformed; a reply cut off at max_tokens is malformed. ` +
+  `Only a well-formed integer different from a*b counts as wrong; malformed replies never count. ` +
+  `A counterexample is a pair where the model is wrong in at least ${BUYER_THRESHOLD} of ${BUYER_RUNS} runs. ` +
   `Disputes are re-run ${ARBITER_RUNS} times and upheld at ${ARBITER_THRESHOLD}.`;
 
+export const SUPPORTED_SPEC = { modelId: MODEL_ID, spec: CLAIM_SPEC } as const;
+
+/// Exact match on both fields. A claim this tree cannot evaluate is never traded against.
+export function claimIsSupported(claim: { modelId: string; spec: string }): boolean {
+  return claim.modelId === SUPPORTED_SPEC.modelId && claim.spec === SUPPORTED_SPEC.spec;
+}
+
 export type Role = "deployer" | "buyer" | "seller" | "rogue" | "newcomer" | "arbiter";
+export const ROLES: readonly Role[] = ["deployer", "buyer", "seller", "rogue", "newcomer", "arbiter"];
 
 const ANVIL_KEYS: Record<Role, Hex> = {
   deployer: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",

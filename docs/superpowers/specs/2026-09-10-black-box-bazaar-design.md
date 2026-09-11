@@ -250,3 +250,84 @@ backend.
 | maxHits per claim | 3 | market-set |
 | buyer runs / threshold | 3 / 2 | 5 / 3 |
 | arbiter runs / threshold | 5 / 3 | 9 / 5 |
+
+## Amendments after external review, 2026-09-10
+
+An external review of the built system found six things the sections above
+either missed or got wrong. Each is listed with the change made, by layer.
+Earlier sections stand as written; where they disagree with this section,
+this section wins.
+
+1. **Delivery was never checked.** A seller could commit a real pair, reveal
+   garbage ciphertext, disclose the real pair in the dispute, and win, because
+   the arbiter only ever saw the disclosure. Contract: `disclose` now takes the
+   ephemeral secret as well as the plaintext and salt, stores it, and emits it
+   in `Disclosed`. Agents: the seller keeps its per-sale ephemeral secret and
+   discloses it; the arbiter rebuilds the box against the claim's buyer key
+   and compares it with the posted ciphertext before running the model, and a
+   mismatch refutes the seller. This is a trusted-arbiter check, not on-chain
+   cryptography; the contract stores the secret but cannot verify a box. Page:
+   the dispute reason is shown beside the sale.
+
+2. **Arbiter silence locked funds after disclosure.** Once a seller disclosed,
+   the only exit was `rule`, and nothing happened if the arbiter never called
+   it. Contract: a fifth immutable `arbitrationWindow`, a ninth state
+   `Unarbitrated`, and `resolveUnarbitrated(saleId)`, callable by anyone once
+   `block.timestamp > disclosedAt + arbitrationWindow`. Each party takes back
+   its own bond, the reserved bounty returns to the claim, and the seller is
+   neither credited nor refuted; `sellerUnarbitrated` is a new counter, kept
+   apart from silence. `rule` still works at any time after disclosure until
+   someone resolves. The buyer keeps the disclosed pair without paying; that is
+   the stated tradeoff. Agents: the sweep calls it. Page: the state and the
+   count are shown.
+
+3. **Agents never checked the claim they traded against, and the parser was
+   too loose.** `parsePair` accepted any integers, and "last integer" parsing
+   turned `123.45` into `45`, so a decimal or a sentence could be sold as a
+   wrong answer. Agents: one supported specification lives in `config.ts`, and
+   buyer, seller and arbiter compare the claim's model id and spec text with
+   it by exact match before any spend; pairs are validated to 100..999.
+   Replies are classified strictly: an answer is a single integer with
+   optional thousands commas and at most one trailing period, anything else is
+   malformed, malformed never counts as a wrong multiplication, and output
+   truncated at `max_tokens` is malformed. The spec text posted on-chain must
+   describe this same rule, since it is the text sellers agree to.
+
+4. **Reputation display folded withdrawn into refuted and called ten
+   refutations "unknown".** Section 7's rule read "unknown" whenever confirmed
+   was zero, so a seller refuted ten times looked like a newcomer, and the
+   "refuted" number silently included withdrawn sales. Page: the section is now
+   "Settlement history". Only unadjudicated history reads "unverified";
+   refutations with no confirmations read "refuted history"; confirmations
+   read "N confirmed" with the adverse outcomes beside it; withdrawn and
+   unarbitrated are shown as their own counts. A note states that
+   address-level history can be self-dealt.
+
+5. **Lifecycle bugs in the agents.** The seller took its sale id from
+   `saleCount() - 1`, which is wrong the moment two sellers commit in the same
+   block; it held plaintext and salt only in memory, so a restart made a
+   dispute unanswerable; it exited on a timer rather than when its sales
+   ended; it probed without a budget; and one thrown error ended a watcher.
+   Agents: the sale id is read from the seller's own receipt, the `Committed`
+   event; seller material is persisted to `agents/.state/<role>.json`, which
+   is gitignored, before the reveal is sent; sellers stay alive until every
+   sale they made is in a terminal state or `--seconds` elapses; `--budget`
+   caps probes; watcher loops retry inside try/catch. Demo: participants run
+   concurrently, and on-chain states drive the scenes instead of fixed waits.
+
+6. **Recording defects.** `const URL` shadowed the global `URL` constructor;
+   explicit waits summed to more than five minutes; the overlay leaked the
+   seller's pair before reveal; the page showed only current state, not what
+   happened. Recorder: the variable is renamed, waits are driven by state, and
+   the overlay shows no seller material before reveal. Page: an event history
+   per sale, with a transaction link for each step. The synthetic narration
+   variant is dropped.
+
+### Still not caught
+
+- A dishonest single arbiter.
+- A buyer and arbiter colluding.
+- Resale of the same pair under a new salt. The on-chain duplicate proof in
+  section 4 is designed, not built.
+- Self-dealing addresses: one party behind both buyer and seller, buying its
+  own confirmations.

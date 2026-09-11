@@ -7,3 +7,8 @@ broadcast/
 *.webm
 *.mp4
 agents/.state/
+demo/logs/
+demo/scene.txt
+demo/timeline.json
+demo/out/
+demo/node_modules/
