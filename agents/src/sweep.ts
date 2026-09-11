@@ -2,7 +2,7 @@
 // Anyone may call these. The demo runs it from the deployer wallet (anvil account 0, DEPLOYER_KEY on
 // a testnet) so the arbiter's rulings and the sweep's settlements never contend for one nonce.
 import { clients, isTerminal, readWindows, send, sleep, sweepAction, txLink, type SweepAction, type Windows } from "./chain.ts";
-import { POLL_MS } from "./config.ts";
+import { DEMO_STEP_MS, POLL_MS } from "./config.ts";
 import { logger } from "./log.ts";
 
 const args = process.argv.slice(2);
@@ -34,6 +34,7 @@ async function once() {
       if (isTerminal(s.state)) { done.add(i); continue; }
       const action = sweepAction(s, now, windows);
       if (!action) continue;
+      if (action === "settle" && DEMO_STEP_MS) await sleep(DEMO_STEP_MS); // demo pacing, see config.ts
       const rc = await send(publicClient, market.write[action]([BigInt(i)]));
       log(SAYS[action], { saleId: i, tx: txLink(rc.transactionHash) });
     } catch (e) { log("sweep call failed", { saleId: i, error: errText(e) }); }

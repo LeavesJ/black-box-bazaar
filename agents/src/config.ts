@@ -20,6 +20,10 @@ export const BUYER_THRESHOLD = 2;
 export const ARBITER_RUNS = 5;
 export const ARBITER_THRESHOLD = 3;
 export const POLL_MS = Number(process.env.POLL_MS ?? 3000);
+/// Demo pacing: milliseconds each agent waits before a state-changing send (reveal, disclose, confirm,
+/// dispute, rule, settle), so a recording's captions keep up with the chain. 0, the default, is no wait;
+/// demo/scenes.sh sets it for the whole run. An empty string reads as 0, never NaN.
+export const DEMO_STEP_MS = Number(process.env.DEMO_STEP_MS || 0);
 
 /// The one specification every agent in this tree can evaluate. It states the parser rule so a
 /// reply's classification is part of the claim, not a private convention of one agent.

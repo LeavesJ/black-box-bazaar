@@ -1,7 +1,7 @@
 // agents/src/arbiter.ts
 import { hexToBytes } from "viem";
 import { REASON_NAMES, S, type Windows, clients, isDisclosed, isTerminal, isTerminalRevert, keepTrying, readWindows, send, sleep, txLink } from "./chain.ts";
-import { ARBITER_RUNS, ARBITER_THRESHOLD, HI, LO, POLL_MS, claimIsSupported } from "./config.ts";
+import { ARBITER_RUNS, ARBITER_THRESHOLD, DEMO_STEP_MS, HI, LO, POLL_MS, claimIsSupported } from "./config.ts";
 import { parsePair, verifyDelivery } from "./crypto.ts";
 import { logger } from "./log.ts";
 import { modelIsWrong } from "./model.ts";
@@ -50,6 +50,7 @@ async function judge(saleId: number, s: any): Promise<Ruling | null> {
 }
 
 async function record(saleId: number, ruling: Ruling) {
+  if (DEMO_STEP_MS) await sleep(DEMO_STEP_MS); // demo pacing, see config.ts
   const rc = await send(publicClient, market.write.rule([BigInt(saleId), ruling.sellerWasRight]));
   log(ruling.event, { saleId, ...ruling.fields, tx: txLink(rc.transactionHash) });
 }

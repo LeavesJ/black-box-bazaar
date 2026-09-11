@@ -7,7 +7,10 @@ const REASONS = ["cannot decrypt", "commit mismatch", "not reproduced"];
 const CHUNK_START = 2000n;
 const CHUNK_FLOOR = 16n;
 const ACTIVITY_ROWS = 12;
-const REFRESH_MS = new URLSearchParams(location.search).get("record") === "1" ? 1500 : 5000; // the recorder wants the badge under its caption
+const PARAMS = new URLSearchParams(location.search);
+const PRESENT = PARAMS.get("present") === "1";                 // the click-through presenter (docs/present.js, demo/console.mjs)
+const TIGHT = PARAMS.get("record") === "1" || PRESENT;         // the recorder's view, which the presenter shares
+const REFRESH_MS = TIGHT ? 1500 : 5000;                        // the recorder wants the badge under its caption
 // A getLogs error that names the span is the RPC's cap; anything else is transient and retried.
 const RANGE_ERROR = /range|limit|too many|exceed/i;
 const RETRIES = 3;
@@ -18,8 +21,10 @@ const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 // ?record=1 is the recorder's view: the thesis and each claim's spec text are hidden and cards are tighter, so the
-// cards the captions point at fit beside the recorder's overlay. index.html carries the .record rules.
-if (new URLSearchParams(location.search).get("record") === "1") document.documentElement.classList.add("record");
+// cards the captions point at fit beside the recorder's overlay. index.html carries the .record rules. ?present=1
+// is the same view with the presenter panel on top, driven by demo/console.mjs.
+if (TIGHT) document.documentElement.classList.add("record");
+if (PRESENT) import("./present.js").catch((e) => { $("foot").textContent = "presenter failed: " + e.message; });
 
 const depRes = await fetch("./deployment.json", { cache: "no-store" });
 if (!depRes.ok) {

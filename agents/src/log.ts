@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const LOG_DIR = join(here, "..", "..", "demo", "logs");
+// demo/logs by default; LOG_DIR moves it, so a presenter run (demo/console.mjs) never writes over a recording's logs.
+const LOG_DIR = process.env.LOG_DIR || join(here, "..", "..", "demo", "logs");
 
 export function logger(role: string) {
   mkdirSync(LOG_DIR, { recursive: true });

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { privateKeyToAccount } from "viem/accounts";
-import { ANVIL_ADDRESSES, CLAIM_SPEC, HI, LO, MODEL_ID, ROLES, ROLE_WALLETS, SUPPORTED_SPEC, claimIsSupported, keyFor } from "../src/config.ts";
+import { ANVIL_ADDRESSES, CLAIM_SPEC, DEMO_STEP_MS, HI, LO, MODEL_ID, ROLES, ROLE_WALLETS, SUPPORTED_SPEC, claimIsSupported, keyFor } from "../src/config.ts";
 
 test("claimIsSupported is exact equality on modelId and spec", () => {
   assert.equal(claimIsSupported({ modelId: SUPPORTED_SPEC.modelId, spec: SUPPORTED_SPEC.spec }), true);
@@ -54,4 +54,20 @@ test("off anvil the env key is the only source: present it wins, absent keyFor t
   const k = "0x" + "22".repeat(32);
   assert.equal(keyForOn("base-sepolia", { QUIET_KEY: k }), k);
   assert.match(keyForOn("base-sepolia", { QUIET_KEY: "" }), /threw: QUIET_KEY is not set and chain is not anvil/);
+});
+
+// The demo's pacing knob: a sleep before every state-changing send, so a recording's captions keep up. It is
+// read at import, so the default and the override are both read in a child process with the variable controlled.
+const stepMsOn = (env: Record<string, string>, unset = false) => {
+  const e: Record<string, string | undefined> = { ...process.env, ...env };
+  if (unset) delete e.DEMO_STEP_MS;
+  return spawnSync(process.execPath, ["--input-type=module", "-e", 'import { DEMO_STEP_MS } from "./src/config.ts"; console.log(JSON.stringify(DEMO_STEP_MS));'],
+    { cwd: fileURLToPath(new URL("..", import.meta.url)), env: e, encoding: "utf8" }).stdout.trim();
+};
+
+test("DEMO_STEP_MS is a number that defaults to 0 and reads the environment", () => {
+  assert.equal(typeof DEMO_STEP_MS, "number");
+  assert.equal(stepMsOn({}, true), "0", "unset: no pacing");
+  assert.equal(stepMsOn({ DEMO_STEP_MS: "8000" }), "8000");
+  assert.equal(stepMsOn({ DEMO_STEP_MS: "" }), "0", "empty string reads as 0, not NaN");
 });

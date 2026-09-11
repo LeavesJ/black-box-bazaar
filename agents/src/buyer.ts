@@ -1,7 +1,7 @@
 // agents/src/buyer.ts
 import { bytesToHex, parseEther, type Hex } from "viem";
 import { REASON, REASON_NAMES, S, type Windows, clients, eventFromReceipt, isTerminal, isTerminalRevert, keepTrying, readWindows, send, sleep, txLink } from "./chain.ts";
-import { BOUNTY_ETH, BUYER_RUNS, BUYER_THRESHOLD, CLAIM_DURATION, HI, LO, MAX_HITS, POLL_MS, SUPPORTED_SPEC, claimIsSupported, keyFor } from "./config.ts";
+import { BOUNTY_ETH, BUYER_RUNS, BUYER_THRESHOLD, CLAIM_DURATION, DEMO_STEP_MS, HI, LO, MAX_HITS, POLL_MS, SUPPORTED_SPEC, claimIsSupported, keyFor } from "./config.ts";
 import { boxKeypairFromEthKey, commitHash, open, parsePair, splitEnvelope } from "./crypto.ts";
 import { logger } from "./log.ts";
 import { modelIsWrong } from "./model.ts";
@@ -51,6 +51,7 @@ async function decide(saleId: bigint, claimId: bigint, ciphertext: Hex, commit: 
 }
 
 async function act(saleId: bigint, claimId: bigint, d: Decision) {
+  if (DEMO_STEP_MS) await sleep(DEMO_STEP_MS); // demo pacing, see config.ts: before the confirm or the dispute
   if (d.act === "confirm") {
     const receipt = await send(publicClient, market.write.confirm([saleId]));
     log("confirmed", { saleId, tx: txLink(receipt.transactionHash) });

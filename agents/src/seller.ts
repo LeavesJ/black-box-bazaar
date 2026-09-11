@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { bytesToHex, hexToBytes, type Hex } from "viem";
 import abi from "./abi.json" with { type: "json" };
 import { REASON_NAMES, S, STATE_NAMES, clients, committedSaleIdFromReceipt, isDisclosed, isTerminal, saleIdFromCommittedLogs, send, sleep, txLink } from "./chain.ts";
-import { BUYER_RUNS, BUYER_THRESHOLD, CHAIN, HI, LO, MARKET_ADDRESS, POLL_MS, ROLES, claimIsSupported, type Role } from "./config.ts";
+import { BUYER_RUNS, BUYER_THRESHOLD, CHAIN, DEMO_STEP_MS, HI, LO, MARKET_ADDRESS, POLL_MS, ROLES, claimIsSupported, type Role } from "./config.ts";
 import { canonicalPair, commitHash, envelope, randomBytesHex, randomSalt, seal, stringToBytes } from "./crypto.ts";
 import { logger } from "./log.ts";
 import { modelIsWrong } from "./model.ts";
@@ -158,10 +158,12 @@ async function tick(startup = false): Promise<number> {
     open++;
     if (s.state === S.Committed) {
       if (revealWindow !== null && now > BigInt(s.committedAt) + revealWindow) continue; // the sweep will expire it
+      if (DEMO_STEP_MS) await sleep(DEMO_STEP_MS); // demo pacing, see config.ts
       const rr = await send(publicClient, market.write.reveal([saleId, m.ciphertext]));
       log(m.attack === "garbage" ? "attack garbage: revealed random bytes instead of the sealed envelope" : "revealed",
         { saleId, bytes: hexToBytes(m.ciphertext).length, tx: txLink(rr.transactionHash) });
     } else if (s.state === S.Disputed && !isDisclosed(s)) {
+      if (DEMO_STEP_MS) await sleep(DEMO_STEP_MS); // demo pacing, see config.ts
       const rc = await send(publicClient, market.write.disclose([saleId, m.plaintext, m.salt, m.ephemeralSecret]));
       log("disputed by buyer, disclosed plaintext, salt and ephemeral secret on-chain",
         { saleId, reason: REASON_NAMES[s.disputeReason as number] ?? s.disputeReason, tx: txLink(rc.transactionHash) });

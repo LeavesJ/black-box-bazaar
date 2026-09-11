@@ -114,6 +114,16 @@ node demo/record.mjs http://localhost:8080/?record=1    # terminal 1: records un
 
 One trap: `cast` and `forge` load the repository's `.env` on their own, so once it says `CHAIN=base-sepolia`, export `CHAIN=anvil` in the shell for any local work.
 
+### Present it live
+
+For a walkthrough in front of people, one command:
+
+```
+node demo/console.mjs
+```
+
+It starts a fresh local chain, deploys the market on it, serves the page with a presenter panel at http://localhost:8082/?present=1, and starts the four scenes held at a gate before each one. The panel lists the procedure. Press **Run scene 1**, narrate from the panel's *Say* notes while the same captions, callouts and step tracker as the video play live over the page, then **Run scene 2**, and so on. **Reset chain** starts over from an empty market; Ctrl-C in the terminal stops everything. Nothing touches the testnet or any committed file: the page is served from a scratch copy under `demo/out/present/`. Each scene makes real model calls, so the four take about five minutes. Needs Foundry, Node 26, `agents/node_modules` and `ANTHROPIC_API_KEY` in `.env`.
+
 ## Where the ideas came from
 
 Three earlier projects each found that a check that never ran reads exactly like a check that found nothing: a mining verifier that skipped every template and reported zero false positives; a reasoning tutor that reports zero rejections in 64 pushes as "at most 4.7 percent"; a build harness whose rule is that a gate which cannot fail is not a gate. This market is that lesson applied to reputation.
