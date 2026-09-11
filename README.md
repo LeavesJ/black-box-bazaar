@@ -1,76 +1,83 @@
 # Black Box Bazaar: a market of refutations
 
-Autonomous agents buy and sell counterexamples to a claim about an AI model, on Base Sepolia. The buyer cannot see the counterexample before paying.
+Autonomous agents buy and sell counterexamples to a claim about an AI model. The buyer cannot see the counterexample before paying. Live on Base Sepolia.
 
 - Page: https://leavesj.github.io/black-box-bazaar/
 - Contract: `0xf347ff05478ad271adab818696134bc3cd0a07ed` on Base Sepolia, https://sepolia.basescan.org/address/0xf347ff05478ad271adab818696134bc3cd0a07ed
 - Video: [media/bazaar-demo.mp4](media/bazaar-demo.mp4) (recorded against Base Sepolia, 157 s)
 - Rehearsal on a local chain, same code and scenes: [media/rehearsal-anvil.mp4](media/rehearsal-anvil.mp4)
 
-## Vertical
+## The problem, in one paragraph
 
-Model-evaluation red-teaming. A buyer agent acts for whoever maintains a model and wants to know where a stated property fails. Seller agents hunt for inputs that break it and sell them. An arbiter agent re-runs disputed inputs and rules. The good is a counterexample: valuable because the buyer does not have it yet, and checkable by re-running the model once revealed. No language model touches the contract.
+Information is the one good you cannot inspect before you buy it. If the seller shows you the finding, you no longer need to pay for it. If they don't, you have no idea whether it is worth anything. Every marketplace answer starts the same way: commit a hash, escrow the payment, reveal, verify. The part most designs skip is what happens after the reveal, when the buyer has already paid and has no reason to check. "No dispute" then gets read as "satisfied", and a seller's reputation is built out of buyers who never looked. This market does two things about that. It only sells goods that check themselves once revealed. And it never lets silence count as approval.
 
-## Trust assumptions
+## The vertical
 
-- The pinned model API is the shared ground truth; buyer, seller and arbiter reach the same model at the same settings.
-- The arbiter address is honest. There is one. It also performs the delivery check, off-chain.
-- Temperature 0 is not deterministic. "The model is wrong on this input" means wrong in a majority of fixed runs: buyer 2 of 3, arbiter 3 of 5. The claim states this.
+Model-evaluation red-teaming. Someone who maintains a model, or an eval suite, wants to know where a property they believe in actually fails. Red-teamers find those failures. The good being sold is a counterexample: an input on which the model breaks a stated claim. Its whole value is that the buyer does not have it yet, and the moment it is revealed the buyer can test it with one re-run. That is what makes it a fair thing to sell blind.
 
-## Biggest design decision
+The demo claim: `claude-haiku-4-5-20251001`, at temperature 0, multiplies two three-digit numbers correctly. Measured before building: it fails about 1 in 10 three-digit pairs (3 of 30). Four-digit pairs fail 3 in 4, which would make the claim silly. Three-digit is a claim a buyer would actually post.
 
-**Unadjudicated is a third state that never rounds to confirmed.** If a buyer reads a reveal and goes silent past the window, anyone can settle. The seller is paid, because the buyer had its chance. But the sale is recorded as unadjudicated, the buyer's silent count rises, and the seller's confirmed count does not move. Money follows the default; reputation does not. Most marketplaces read "no dispute" as "satisfied". In a black-box market that measures apathy, not quality.
+## A sale, step by step
 
-## One important limitation
+Three agents, each with its own wallet: a **buyer**, a **seller**, and an **arbiter**. All three query the same pinned model at the same settings. No language model ever touches the contract.
 
-A single arbiter. The dispute path is one address that re-runs the test and rules. A vanished arbiter no longer locks funds (see unarbitrated), but a dishonest one, or one colluding with the buyer, cannot be caught by the contract. The interface is one address so a quorum can replace it.
+1. **The buyer posts a claim.** "This model multiplies three-digit numbers correctly." It says how to test it (the prompt, the pass condition, how many runs), what it pays per counterexample, how many it will buy, and publishes an encryption key. The whole bounty pool is escrowed now, before any seller shows up. That is what makes this a black box for the buyer: the money is committed before the goods exist.
+2. **The seller hunts.** It asks the model random pairs until it finds one the model gets wrong. It commits a hash of that pair and posts a bond. The bond stops spam; a duplicate hash on the same claim is rejected; each commitment reserves one bounty slot so the escrow can never be over-promised.
+3. **The seller reveals, encrypted.** The pair and its salt go on chain, sealed to the buyer's key. Everyone can see that something was delivered and when. Only the buyer can read it.
+4. **The buyer checks.** It decrypts, confirms the hash matches the commitment, and re-runs the model three times. If the model is wrong in at least two, the buyer confirms. The seller is paid the bounty and gets its bond back.
+5. **Or the buyer disputes.** It posts a bond of its own and a reason: could not decrypt, commitment mismatch, or not reproduced. The seller must now disclose the pair, the salt, and the encryption secret it used, on chain and in public. A seller that cannot is slashed and the buyer refunded.
+6. **The arbiter rules.** First it checks delivery: does the disclosed secret reproduce the ciphertext that was posted? If not, the seller is refuted without running the model at all. If delivery checks out, the arbiter re-runs the pair five times. Upheld: the seller gets the bounty and both bonds, and the buyer's disputes-lost count rises. Refuted: the seller's bond goes to the buyer.
+7. **Or the buyer says nothing.** When the window closes with no action, anyone can settle. The seller is paid, because the buyer had its chance. But the sale is recorded as *unadjudicated*, the buyer's silent count rises, and the seller's confirmed count stays where it was.
 
-## How it works
+Every number the page shows is one of these counters, read from the chain.
 
-1. **Claim.** The buyer posts a model id, the test as text, a bounty per counterexample, a maximum count, an expiry and an x25519 public key. The whole bounty pool is escrowed.
-2. **Commit.** The seller posts `keccak256(claimId, plaintext, salt)` with a bond. Each commitment reserves one bounty slot, so escrow is never over-committed. A duplicate hash on a claim is rejected.
-3. **Reveal.** The seller posts the plaintext and salt, boxed to the buyer's key, on-chain, and keeps the ephemeral secret it used.
-4. **Adjudicate.** The buyer opens the box, checks the commitment, re-runs the model, and confirms or disputes with a bond. A dispute carries a reason: `CannotDecrypt`, `CommitMismatch` or `NotReproduced`.
-5. **Disclose.** The seller must post plaintext, salt and ephemeral secret on-chain. The contract checks plaintext and salt against the commitment and rejects an empty plaintext. A seller that cannot disclose is withdrawn and its bond goes to the buyer.
-6. **Delivery check.** Spec-independent, and applied to every dispute before anything else. The arbiter rebuilds the box from the disclosed plaintext, salt and secret against the buyer's key and compares it with the posted reveal. A mismatch means the pair was never delivered, and the seller is refuted with no model run. Only then does the arbiter evaluate the model, and only for the one supported specification. A trusted-arbiter check, not on-chain cryptography: the contract stores the secret but cannot verify a box.
-7. **Rule.** The arbiter re-runs the pair five times. Upheld pays the seller the bounty and both bonds, and the buyer's disputes-lost count rises. Refuted sends both bonds to the buyer.
-8. **Unarbitrated.** If no ruling arrives within the arbitration window after disclosure, anyone resolves. Each party gets its own bond back, the bounty slot returns to the claim, and the seller is neither credited nor refuted. The tradeoff: the buyer keeps the disclosed pair without paying.
-9. **Silence.** If the adjudication window closes with no buyer action, anyone settles. Seller paid, sale unadjudicated.
+## Four ways it goes wrong, and what happens
 
-## Payments
+These are the four scenes in the video.
 
-Every payout is a push with a 50000 gas stipend. A recipient that refuses it is credited in `owed(address)` and `PaymentDeferred` is emitted. The transition completes either way, so no recipient can revert a settlement by rejecting its money. `withdraw()` pays the credit out and emits `Paid`. The page shows a deferred balance on the settlement card.
+**A planted pair.** A rogue seller sells a pair the model actually gets right. The buyer re-runs it, sees the model is right, and disputes. The rogue discloses. The arbiter re-runs it five times, right every time, and refutes. The rogue loses its bond and its card reads *refuted history* from then on.
 
-## Settlement history
+**A real pair, never delivered.** A seller finds a genuine counterexample, commits to it honestly, then reveals random bytes instead of the encrypted pair. Without a delivery check this seller wins: the buyer disputes, the seller discloses the real pair, the arbiter re-runs it and upholds the seller, and the buyer loses its bond for a good it never received. So the arbiter checks delivery first. The disclosed secret does not reproduce the posted reveal, and the seller is refuted with no model run.
 
-Each address's settled outcomes appear under this heading; the headline is the first matching row.
+**A silent buyer.** A wallet with no history sells a counterexample and the buyer never looks. The window passes, anyone settles, the seller is paid. Its card reads *unverified*: one unadjudicated, zero confirmed. Money followed the default. Reputation did not.
 
-| history | headline |
+**A vanished arbiter.** A seller discloses and no ruling ever comes. After the arbitration window, anyone can resolve: each party takes back its own bond, the bounty slot returns to the claim, and the seller is neither credited nor refuted. The buyer keeps the disclosed pair without paying. That is a deliberate tradeoff, and it is recorded as its own state rather than disguised as silence.
+
+## The four answers
+
+**Vertical.** Model-evaluation red-teaming, as above.
+
+**Trust assumptions.** The pinned model API is the shared ground truth, and buyer, seller and arbiter all reach the same model at the same settings. The arbiter is honest; there is one. Temperature 0 is not deterministic, so "the model is wrong on this input" means wrong in a majority of fixed runs (buyer 2 of 3, arbiter 3 of 5), and the claim says so.
+
+**Biggest design decision.** Unadjudicated is a third state that never rounds to confirmed. A silent buyer pays the seller but earns it nothing. A seller with zero confirmed sales reads *unverified* no matter how many silent sales it was paid for. Most marketplaces read "no dispute" as "satisfied"; in a black-box market that measures apathy, not quality.
+
+**One important limitation.** A single arbiter. It is one address that re-runs the test and rules, and it also does the delivery check, off chain. A vanished arbiter no longer locks funds, but a dishonest one, or one colluding with the buyer, cannot be caught by the contract. The interface is one address so a quorum can replace it.
+
+## What the page shows
+
+Under **Settlement history**, each address gets a headline; the first matching row wins.
+
+| what the record holds | headline |
 |---|---|
 | any confirmations | N confirmed, with the adverse counts beside it |
 | none confirmed, any refuted | refuted history |
 | none confirmed or refuted, any withdrawn | withdrawn history |
-| none confirmed, refuted or withdrawn, any unarbitrated | unarbitrated history |
+| none of those, any unarbitrated | unarbitrated history |
 | only unadjudicated sales | unverified |
 | nothing settled | no history |
 
-The adverse row (refuted, withdrawn, unarbitrated) shows whenever any of those is non-zero, whatever the headline. Withdrawn (never revealed, or never disclosed) and unarbitrated are never folded into refuted. Address-level history can be self-dealt: one party can post a claim from a second address, sell to itself and confirm.
+Withdrawn (never revealed, or never disclosed) and unarbitrated are shown as their own numbers and never folded into refuted. The page prints its own caveat: this is settlement history at the address level, not independent credibility. One party can post a claim from a second address, sell to itself, and confirm.
 
-## The one supported specification
+## Details that matter
 
-The agents support exactly one claim, held in `agents/src/config.ts`: `claude-haiku-4-5-20251001` at temperature 0 multiplies two three-digit integers correctly, prompt `What is {a} × {b}? Reply with only the integer.` Before any spend, buyer, seller and arbiter compare the claim's model id and spec text with it by exact match and refuse anything else. Pairs are validated to 100..999.
+- **A payment can never block a settlement.** Every payout is a push with a gas stipend. A recipient that refuses it is credited in `owed(address)` and can `withdraw()` later. Nobody can jam a transition by rejecting their own money.
+- **One supported specification.** Before spending anything, the agents compare a claim's model id and spec text with the one they support, by exact match, and refuse anything else. Pairs must be three-digit.
+- **The parser rule.** A reply counts only if it is a single integer, with thousands commas and one trailing period allowed. Anything else is malformed, and malformed never counts as a wrong multiplication, so a refusal or a sentence cannot be sold as a counterexample. A reply cut off at the token limit is malformed.
+- **Delivery is checked by the arbiter, not the chain.** The contract stores the disclosed secret but cannot verify a box. That is a trusted-arbiter check, and this README says so rather than implying on-chain cryptography.
 
-Measured before building: three-digit pairs fail 3 of 30, four-digit 15 of 20, which would make the claim obviously false.
+## What it does not catch
 
-## The parser rule
-
-A reply counts as an answer only if it is a single integer, with optional thousands commas and at most one trailing period. Anything else is malformed. A malformed reply never counts as a wrong multiplication, so a refusal or a sentence cannot be sold as a counterexample. A reply cut off at `max_tokens` is malformed.
-
-## Failure modes
-
-Designed against: nondeterminism (majority of stated runs); version drift (pinned in the claim); garbage reveals (delivery check, then refutation); a reveal the buyer cannot open (dispute reason, delivery check); frivolous disputes (bond; a lost dispute publishes the pair); silent buyers (settle rule, unverified headline); commit-and-vanish (reveal window, bond forfeited); a vanished arbiter (unarbitrated); a recipient that rejects payment (owed); replies that are not answers (parser rule); a claim the agent does not understand (exact-match refusal).
-
-Still not caught: a dishonest single arbiter; a buyer and arbiter colluding; resale of the same pair under a new salt (on-chain dedup is designed, not built); self-dealing between addresses one party controls; a different model behind the same API; a seller that commits to an empty or junk preimage and never discloses (it forfeits its bond, the designed outcome); and delivery itself, since nothing on-chain proves it, only the arbiter's reconstruction.
+A dishonest single arbiter. A buyer and arbiter colluding. Resale of the same pair under a new salt (an on-chain check that opens a prior commitment is designed, not built). Self-dealing between addresses one party controls. A different model behind the same API. Delivery itself, since nothing on chain proves it, only the arbiter's reconstruction. A seller that commits to junk and never discloses simply forfeits its bond, which is the designed outcome.
 
 ## Run it
 
@@ -84,20 +91,13 @@ npm run -s wallets -- gen       # appends six role keys to .env: buyer, seller, 
 npm run -s wallets -- fund      # funds each role from the deployer
 ```
 
-Deploy with `./scripts/deploy-testnet.sh`. It checks the deployer holds Base Sepolia ETH, generates and funds the role wallets if `.env` lacks them, deploys with all four windows at `WINDOW` seconds (default 60), writes the ABI and `docs/deployment.json`, verifies on Sourcify, and puts `MARKET_ADDRESS` in `.env`.
+Deploy with `./scripts/deploy-testnet.sh`. It checks the deployer holds Base Sepolia ETH, generates and funds the role wallets if `.env` lacks them (shrinking the per-role amount to whatever the balance allows), deploys with all four windows at `WINDOW` seconds (default 60), writes the ABI and `docs/deployment.json`, submits the source to Sourcify, and puts `MARKET_ADDRESS` in `.env`. `./scripts/testnet-run.sh` does that and then publishes the page, records, cuts and fills in this file.
 
-`./demo/scenes.sh` runs four scenes, each on its own wallet:
-
-1. Honest sale, seller wallet: commit, reveal, the buyer confirms, the seller is paid.
-2. Planted pair, rogue wallet: the buyer disputes, the seller discloses, the arbiter refutes.
-3. Garbage reveal, newcomer wallet: a real pair never delivered; the delivery check refutes it.
-4. Silent buyer, quiet wallet: a second claim nobody adjudicates; the sweep settles it as unadjudicated and the wallet reads unverified.
-
-The buyer wallet posts both claims and adjudicates only the first. The arbiter wallet rules. The sweep runs on the deployer wallet. Captions read every count from `rep(address)`.
+`./demo/scenes.sh` runs the four scenes above, each on its own wallet. The buyer wallet posts both claims and adjudicates only the first. The arbiter wallet rules. The sweep runs on the deployer wallet. Captions read every count from `rep(address)`.
 
 The agents behind it, each `npm run -s <agent>` in `agents/`: `buyer -- post`, `buyer -- watch --claim N [--silent]`, `seller -- hunt --claim N [--role seller|rogue|newcomer|quiet] [--attack plant|garbage]`, `arbiter -- watch`, `sweep`. Local dry run: start `anvil`, export `CHAIN=anvil` and `MARKET_ADDRESS`; `cast rpc evm_increaseTime 70` then `cast rpc evm_mine` passes a window.
 
-To record the demo, the chain must be fresh: the captions narrate an empty market, so `scenes.sh` reads `claimCount` and `saleCount` first and refuses to start unless both are 0 (`--allow-existing` overrides). Start a fresh chain, or point `.env` at the testnet, then deploy, export the ABI, serve `docs/` locally, and run the recorder, the scenes and the cut:
+To record, the chain must be fresh: the captions narrate an empty market, so `scenes.sh` reads `claimCount` and `saleCount` first and refuses to start unless both are 0 (`--allow-existing` overrides). Start a fresh chain, deploy, export the ABI, serve `docs/` locally, and run the recorder, the scenes and the cut:
 
 ```
 anvil --block-time 1                                    # fresh chain; or CHAIN=base-sepolia in .env
@@ -112,8 +112,8 @@ node demo/record.mjs http://localhost:8080/?record=1    # terminal 1: records un
 ./demo/cut.sh                                           # after both finish: demo/out/bazaar-demo.mp4
 ```
 
-`record.mjs` takes the page URL as its one argument; `?record=1` hides the thesis and claim spec text so the cards the captions point at fit beside the overlay. On anvil the page shows block numbers for event times, since `scenes.sh` advances the chain clock to pass the adjudication window.
+One trap: `cast` and `forge` load the repository's `.env` on their own, so once it says `CHAIN=base-sepolia`, export `CHAIN=anvil` in the shell for any local work.
 
 ## Where the ideas came from
 
-Three earlier projects each found that a check that never ran reads like a check that found nothing: a mining verifier that skipped every template and reported zero false positives; a reasoning tutor that reports zero rejections in 64 pushes as at most 4.7 percent; a build harness whose rule is that a gate which cannot fail is not a gate. This market is that lesson applied to reputation.
+Three earlier projects each found that a check that never ran reads exactly like a check that found nothing: a mining verifier that skipped every template and reported zero false positives; a reasoning tutor that reports zero rejections in 64 pushes as "at most 4.7 percent"; a build harness whose rule is that a gate which cannot fail is not a gate. This market is that lesson applied to reputation.
