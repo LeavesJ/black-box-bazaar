@@ -15,7 +15,7 @@ set -a; . ./.env; set +a
 # A small bounty keeps the whole demo inside one faucet drip. The buyer escrows
 # bounty x maxHits per claim; every bond is 20% of the bounty. Shell env wins over
 # .env, so this reaches every agent scenes.sh starts.
-export BOUNTY_ETH="${BOUNTY_ETH:-0.0001}"
+export BOUNTY_ETH="${BOUNTY_ETH:-0.0000005}"   # sized to a single small faucet drip; see the deploy-testnet.sh reserve comment
 
 step() { printf '\n== %s\n' "$*"; }
 

@@ -18,7 +18,7 @@ set -a; . ./.env; set +a
 # Fund six roles, keeping a reserve for the deployer's own deploy and transfer gas.
 # Shrinks to whatever the actual balance allows, so a small faucet drip still works
 # without another round of asking for more.
-RESERVE_WEI=2000000000000000   # 0.002 ETH kept back for the deployer's own gas
+RESERVE_WEI=30000000000000   # ~0.00003 ETH: deploy (measured ~2.76M gas) + 6 transfers, at the live gas price, plus margin
 FUND_EACH_WEI="$(cast to-wei "${FUND_EACH:-0.0012}" ether)"
 if [ $(( bal - FUND_EACH_WEI * 6 )) -lt "$RESERVE_WEI" ]; then
   FUND_EACH_WEI=$(( (bal - RESERVE_WEI) / 6 ))
