@@ -2,13 +2,18 @@
 # demo/scenes.sh — runs the four demo scenes against a deployed RefutationMarket.
 # Six roles: buyer, seller, rogue, newcomer, quiet and arbiter. The sweep runs on the deployer wallet.
 # Participants run concurrently; on-chain state, read with cast, drives the captions, and every count or
-# headline a caption quotes is read from the chain at that moment, never written into this file.
-# Captions go to demo/scene.txt as one JSON line {"caption","focus"} (record.mjs overlays the caption and
-# scrolls the focused card into view) and to demo/timeline.json (cut.sh compresses the waits). A caption
-# stays up at least MIN_DWELL seconds before the next may replace it, so none is written and never seen.
+# headline a caption quotes is read from the chain (or the agents' own logs) at that moment, never written here.
+# Each scene line goes to demo/scene.txt as one JSON object,
+#   {"caption","note","focus","label","color","step","scene","title","subtitle","goto"}
+# and to demo/timeline.json with its write time "t" (cut.sh compresses the waits). record.mjs overlays the caption
+# and note, a scene badge, a step tracker, a title card for a line with "title", and a callout on the card "focus"
+# names (sale:N, claim:N or addr:0x…) tagged with "label" in "color". A caption stays up MIN_DWELL seconds before
+# the next line may replace it (a title card covers the page TITLE_S seconds first, and the caption under it gets
+# its dwell after the card ends); a pure title card holds only for its own length.
 # The captions narrate an empty market, so the script refuses a chain that already holds claims or sales.
-# Usage: MARKET_ADDRESS=0x… CHAIN=anvil|base-sepolia demo/scenes.sh [--allow-existing]
-#   (address and chain default from docs/deployment.json; --allow-existing skips the empty-market check)
+# Usage: MARKET_ADDRESS=0x… CHAIN=anvil|base-sepolia [EPILOGUE=1] demo/scenes.sh [--allow-existing]
+#   (address and chain default from docs/deployment.json; --allow-existing skips the empty-market check;
+#    EPILOGUE=1 ends on the live page and explorer named by docs/deployment.json and LIVE_PAGE)
 set -euo pipefail
 export PATH="$HOME/.foundry/bin:$PATH"
 
@@ -16,7 +21,7 @@ ALLOW_EXISTING=0
 for arg in "$@"; do
   case "$arg" in
     --allow-existing) ALLOW_EXISTING=1 ;;
-    *) echo "usage: [MARKET_ADDRESS=0x…] [CHAIN=anvil|base-sepolia] $0 [--allow-existing]" >&2; exit 2 ;;
+    *) echo "usage: [MARKET_ADDRESS=0x…] [CHAIN=anvil|base-sepolia] [EPILOGUE=1] $0 [--allow-existing]" >&2; exit 2 ;;
   esac
 done
 
@@ -27,8 +32,13 @@ LOGS="$HERE/logs"
 SCENE="$HERE/scene.txt"
 TIMELINE="$HERE/timeline.json"
 DEPLOYMENT="$ROOT/docs/deployment.json"
-MIN_DWELL="${MIN_DWELL:-4}"   # seconds a caption stays up before the next may replace it
-LAST_CAPTION_AT=0             # unix time of the last caption write, fractional; caption() maintains it
+MIN_DWELL="${MIN_DWELL:-7}"   # seconds a caption stays up before the next line may replace it
+TITLE_S="${TITLE_S:-3.5}"     # seconds a title card covers the page (record.mjs TITLE_MS; keep them equal)
+CARD_PAD="${CARD_PAD:-0.5}"   # a pure title card holds TITLE_S + CARD_PAD, so the next caption lands as it lifts
+NAV_ALLOW="${NAV_ALLOW:-5}"   # seconds added to an epilogue hold for the recorder's page load
+LIVE_PAGE="${LIVE_PAGE:-https://leavesj.github.io/black-box-bazaar/}"   # the epilogue's first stop
+EPILOGUE="${EPILOGUE:-0}"
+NEXT_AT=0                     # unix time before which no scene line may be written; emit() maintains it
 
 dep_field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$DEPLOYMENT" "$1"; }
 if [ -z "${MARKET_ADDRESS:-}" ] && [ -f "$DEPLOYMENT" ]; then MARKET_ADDRESS="$(dep_field address)"; fi
@@ -48,6 +58,8 @@ CLAIM_SIG='getClaim(uint256)((address,string,string,bytes32,uint256,uint32,uint3
 ST_CONFIRMED=2; ST_DISPUTED=3; ST_REFUTED=4; ST_UNADJUDICATED=6
 # Sale tuple indices. The timestamps are persistent; the state is not, so waits key on timestamps where one exists.
 F_SELLER=1; F_REVEALED_AT=6; F_DISPUTED_AT=7; F_DISCLOSED_AT=10; F_REASON=13; F_STATE=14
+# Claim tuple indices.
+CF_BUYER=0; CF_MAX_HITS=5
 
 PIDS=()
 # kill_tree <pid>: the leaves first, then the process; every pid here descends from one this script started.
@@ -59,9 +71,9 @@ kill_tree() {
 cleanup() {
   local rc=$?
   trap - EXIT
-  # END stops the recorder. After a caption it goes through caption(), so the last one keeps its dwell and the
-  # timeline records it; before any caption (a refused start) it is written bare, so cut.sh sees no timeline.
-  if [ "$LAST_CAPTION_AT" != 0 ]; then caption end END "" || printf '%s\n' '{"caption": "END", "focus": ""}' > "$SCENE"
+  # END stops the recorder. After a scene line it goes through emit(), so the last one keeps its dwell and the
+  # timeline records it; before any line (a refused start) it is written bare, so cut.sh sees no timeline.
+  if [ "$NEXT_AT" != 0 ]; then emit 0 END "" "" "" "" "" "" "" "" 0 || printf '%s\n' '{"caption": "END", "focus": ""}' > "$SCENE"
   else printf '%s\n' '{"caption": "END", "focus": ""}' > "$SCENE"; fi
   for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill_tree "$p"; done
   wait 2>/dev/null || true
@@ -70,34 +82,56 @@ cleanup() {
 trap cleanup EXIT
 
 log() { printf '%s  %s\n' "$(date +%T)" "$*" >&2; }   # stderr: stdout of some callers is captured
-die() { log "FAILED: $*"; caption fail "Demo failed: $*"; exit 1; }
+die() { log "FAILED: $*"; caption 0 "" red "" "" "Demo failed: $*"; exit 1; }
 
-# caption <scene> <text> [focus]: the moment a state is reached, show it and record when. focus names the card
-# the caption is about, "sale:N", "claim:N" or "addr:0x…" (empty for none), and record.mjs scrolls to it.
-# Waits until MIN_DWELL seconds have passed since the previous caption, so no caption is replaced unseen;
-# the timeline entry carries the time of the actual write.
-caption() {
-  local scene="$1" text="$2" focus="${3:-}"
-  LAST_CAPTION_AT="$(python3 - "$SCENE" "$TIMELINE" "$scene" "$text" "$focus" "$LAST_CAPTION_AT" "$MIN_DWELL" <<'PY'
+# emit <scene> <caption> <note> <focus> <label> <color> <step> <title> <subtitle> <goto> <hold>: the moment a state
+# is reached, write one scene line and record when. Waits until the previous line's hold has passed, so no caption
+# is replaced unseen, then holds this one for <hold> seconds (a line with a title and a caption adds TITLE_S, since
+# its caption is only seen once the card lifts). The timeline entry carries the time of the actual write.
+emit() {
+  NEXT_AT="$(python3 - "$SCENE" "$TIMELINE" "$NEXT_AT" "$TITLE_S" "$@" <<'PY'
 import json, os, sys, time
-scene_path, timeline, scene, text, focus, last, dwell = sys.argv[1:8]
-wait = float(last) + float(dwell) - time.time()
+scene_path, timeline, next_at, title_s = sys.argv[1:5]
+scene, caption, note, focus, label, color, step, title, subtitle, goto, hold = sys.argv[5:16]
+wait = float(next_at) - time.time()
 if wait > 0:
     time.sleep(wait)
 if focus.startswith("addr:"):
     focus = focus.lower()
+try:
+    scene = int(scene)
+except ValueError:
+    scene = 0
+line = {"caption": caption, "note": note, "focus": focus, "label": label, "color": color, "step": step,
+        "scene": scene, "title": title, "subtitle": subtitle, "goto": goto}
 now = time.time()
 tmp = scene_path + ".tmp"
 with open(tmp, "w") as f:
-    f.write(json.dumps({"caption": text, "focus": focus}) + "\n")
+    f.write(json.dumps(line) + "\n")
 os.replace(tmp, scene_path)   # one rename, so the recorder never reads a half-written line
 entries = json.load(open(timeline)) if os.path.exists(timeline) and os.path.getsize(timeline) > 0 else []
-entries.append({"scene": scene, "caption": text, "focus": focus, "t": now})
+entries.append({**line, "t": now})
 json.dump(entries, open(timeline, "w"), indent=1)
-print(now)
+hold = float(hold) + (float(title_s) if title and caption else 0.0)
+print(now + hold)
 PY
 )"
+}
+# caption <scene> <step> <color> <focus> <label> <text> [note]: one narrated step, held MIN_DWELL.
+caption() {
+  local scene="$1" step="$2" color="$3" focus="$4" label="$5" text="$6" note="${7:-}"
+  emit "$scene" "$text" "$note" "$focus" "$label" "$color" "$step" "" "" "" "$MIN_DWELL"
   log "[scene $scene] $text"
+}
+# card <scene> <title> <subtitle>: a title card and nothing under it, held for its own length.
+card() {
+  emit "$1" "" "" "" "" "" "" "$2" "$3" "" "$(python3 -c 'import sys; print(float(sys.argv[1]) + float(sys.argv[2]))' "$TITLE_S" "$CARD_PAD")"
+  log "[scene $1] ── $2 — $3"
+}
+# goto_caption <url> <text> <seconds>: the epilogue; the recorder loads the URL, then shows the caption <seconds>.
+goto_caption() {
+  emit 0 "$2" "" "" "" grey "" "" "" "$1" "$(( $3 + NAV_ALLOW ))"
+  log "[epilogue] $1 · $2"
 }
 
 # ---------- chain reads (cast, jq-free) ----------
@@ -208,12 +242,57 @@ post_claim() {
   echo "$out" | grep -o 'CLAIM_ID=[0-9]*' | tail -1 | cut -d= -f2
 }
 
+# ---------- counts the captions quote: chain fields, agent logs, words ----------
+claim_field() { ccall "$CLAIM_SIG" "$1" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0][int(sys.argv[1])])' "$2"; }   # <claimId> <tupleIndex>
+# word <n>: a small count in words, as a caption reads it; larger counts stay digits.
+word() { case "$1" in 0) echo zero ;; 1) echo one ;; 2) echo two ;; 3) echo three ;; 4) echo four ;; 5) echo five ;; 6) echo six ;; 7) echo seven ;; 8) echo eight ;; 9) echo nine ;; 10) echo ten ;; *) echo "$1" ;; esac; }
+# log_field <role> <saleId> <event-regex> <field>: that field from the latest matching line of logs/<role>.log, or "".
+# The buyer's "re-run result" and the arbiter's "ruled: …" lines carry runs and wrong, the counts a re-run caption quotes.
+log_field() {
+  python3 - "$LOGS/$1.log" "$2" "$3" "$4" <<'PY'
+import json, re, sys
+path, sale, pattern, field = sys.argv[1:5]
+found = ""
+try:
+    for line in open(path):
+        try: o = json.loads(line)
+        except ValueError: continue
+        if str(o.get("saleId", "")) == sale and re.search(pattern, str(o.get("event", ""))) and field in o:
+            found = str(o[field])
+except FileNotFoundError:
+    pass
+print(found)
+PY
+}
+# runs_phrase <role> <saleId> <event-regex> <subject>: "re-runs <subject> N times" with N from the log, or without N.
+runs_phrase() {
+  local n; n="$(log_field "$1" "$2" "$3" runs)"
+  if [ -n "$n" ]; then echo "re-runs $4 $(word "$n") times"; else echo "re-runs $4"; fi
+}
+# live_sales_phrase: the deployed market's sales, counted and named from that chain, for the epilogue; "" if unreadable.
+live_sales_phrase() {
+  local addr rpc n i states=() st
+  addr="$(dep_field address)"; rpc="$(dep_field rpc)"
+  [ -n "$addr" ] && [ -n "$rpc" ] || return 0
+  n="$(cast call "$addr" 'saleCount()(uint256)' --rpc-url "$rpc" --chain "$(dep_field chainId)" 2>/dev/null | awk '{print $1}')" || return 0
+  [ -n "$n" ] && [ "$n" -gt 0 ] 2>/dev/null || return 0
+  for ((i = 0; i < n; i++)); do
+    st="$(cast call "$addr" "$SALE_SIG" "$i" --rpc-url "$rpc" --chain "$(dep_field chainId)" --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)[0][int(sys.argv[1])])' "$F_STATE")" || return 0
+    states+=("$(lower "$(state_name "$st")")")
+  done
+  python3 - "$(word "$n")" "${states[@]}" <<'PY'
+import sys
+n, *st = sys.argv[1:]
+print(f"{n.capitalize()} real {'sale' if len(st) == 1 else 'sales'}: {', '.join(st)}.")
+PY
+}
+
 # ---------- run ----------
 mkdir -p "$LOGS"
 rm -f "$LOGS"/*.log "$LOGS"/*.out "$TIMELINE"
 : > "$SCENE"
-# The scenes narrate an empty market ("nothing is on-chain yet", a first claim, a seller with one sale), so a
-# chain that already holds claims or sales makes the captions false. Read both counts and refuse unless told not to.
+# The scenes narrate an empty market (a first claim, a seller with one sale), so a chain that already holds
+# claims or sales makes the captions false. Read both counts and refuse unless told not to.
 C0="$(claim_count)"; S0="$(sale_count)"
 if [ "$C0" != 0 ] || [ "$S0" != 0 ]; then
   if [ "$ALLOW_EXISTING" = 1 ]; then
@@ -228,56 +307,66 @@ log "market $MARKET_ADDRESS on $CHAIN via $RPC_URL · $C0 claims, $S0 sales · a
 
 run_bg arbiter arbiter -- watch --seconds 900
 run_bg sweep sweep -- --seconds 900
-caption 0 "Black Box Bazaar on $CHAIN: $(onchain_phrase "$C0" "$S0"). The arbiter is watching the market and the sweep runs on the deployer wallet."
+card 0 "Black Box Bazaar" "A market where agents sell counterexamples the buyer cannot see until it has paid."
+caption 0 "" grey "" "" "The market is $( [ "$C0" = 0 ] && [ "$S0" = 0 ] && echo empty || echo "not empty: $(onchain_phrase "$C0" "$S0")" ). The arbiter is watching. The sweep runs on the deployer wallet." "Every count on screen is read from the chain as it happens."
 
-# Scene 1 — honest sale, on the seller wallet
-sleep "$MIN_DWELL"   # let the opening caption be true for its whole dwell before anything lands on chain
+# Scene 1 — honest sale, on the seller wallet. The card covers the page while the claim lands.
+card 1 "Scene 1 · An honest sale" "The buyer posts a claim. The seller finds a counterexample. The buyer checks it and pays."
 CLAIM_A="$(post_claim)"; [ -n "$CLAIM_A" ] || die "no CLAIM_ID from buyer post"
-caption 1 "Scene 1 · Claim #$CLAIM_A posted: the buyer escrowed bounties for counterexamples to its claim about the pinned model." "claim:$CLAIM_A"
+caption 1 claim blue "claim:$CLAIM_A" "THE CLAIM" "The buyer posts a claim: this model multiplies three-digit numbers correctly. It escrows $(word "$(claim_field "$CLAIM_A" "$CF_MAX_HITS")") bounties."
 run_bg buyer buyer -- watch --claim "$CLAIM_A" --seconds 900
 N0="$(sale_count)"
+SELLER_ADDR="$(role_address seller)"; [ -n "$SELLER_ADDR" ] || die "the agents' wallet table names no seller wallet (npm run -s wallets -- balances)"
 run_bg seller seller -- hunt --claim "$CLAIM_A" --max 1 --role seller --seconds 600
-caption 1 "Scene 1 · The seller is probing the model for a pair it multiplies wrong. $(sales_phrase "$N0")"
+caption 1 commit green "addr:$SELLER_ADDR" "SELLER" "The seller asks the model random pairs until it gets one wrong. It commits a hash of that pair and posts a bond."
 S1="$(wait_new_sale "$N0" seller 420)"
-SELLER_ADDR="$(sale_seller "$S1")"
-caption 1 "Scene 1 · Sale #$S1: the seller committed a hash of its counterexample and posted a bond." "sale:$S1"
+[ "$(lower "$(sale_seller "$S1")")" = "$(lower "$SELLER_ADDR")" ] || die "sale #$S1 was made by $(sale_seller "$S1"), not the seller wallet $SELLER_ADDR"
 wait_revealed "$S1" 120
-caption 1 "Scene 1 · Sale #$S1 revealed, encrypted to the buyer's key. The buyer decrypts, checks the commit and re-runs the test." "sale:$S1"
+caption 1 reveal green "sale:$S1" "SALE #$S1" "The seller reveals the pair, encrypted to the buyer's key. Only the buyer can read it."
 wait_state "$S1" "$ST_CONFIRMED" 240
-caption 1 "Scene 1 · Sale #$S1 confirmed: the buyer reproduced the failure. The seller is paid and its card reads $(headline_for "$SELLER_ADDR") with $(seller_unadjudicated "$SELLER_ADDR") unadjudicated." "addr:$SELLER_ADDR"
+caption 1 adjudicate blue "sale:$S1" "SALE #$S1" "The buyer decrypts it, checks the hash, and $(runs_phrase buyer "$S1" '^re-run result$' "the model"). It fails every time. Confirmed."
+caption 1 settle green "addr:$SELLER_ADDR" "SELLER'S CARD" "The seller is paid and its bond comes back. Its card reads $(headline_for "$SELLER_ADDR")." "Confirmed means the buyer checked. That is the only way this number moves."
 
 # Scene 2 — planted pair, on the rogue wallet
+card 2 "Scene 2 · A planted pair" "A rogue seller sells a pair the model gets right."
 N0="$(sale_count)"
+ROGUE_ADDR="$(role_address rogue)"; [ -n "$ROGUE_ADDR" ] || die "the agents' wallet table names no rogue wallet (npm run -s wallets -- balances)"
 run_bg rogue seller -- hunt --claim "$CLAIM_A" --max 1 --role rogue --attack plant --seconds 600
-caption 2 "Scene 2 · A rogue wallet plants a pair the model gets right and sells it as a counterexample."
+caption 2 commit red "addr:$ROGUE_ADDR" "ROGUE" "The rogue picks a pair the model answers correctly and sells it anyway."
 S2="$(wait_new_sale "$N0" rogue 420)"
+[ "$(lower "$(sale_seller "$S2")")" = "$(lower "$ROGUE_ADDR")" ] || die "sale #$S2 was made by $(sale_seller "$S2"), not the rogue wallet $ROGUE_ADDR"
 wait_revealed "$S2" 120
-caption 2 "Scene 2 · Sale #$S2 revealed. The buyer re-runs the test on the planted pair." "sale:$S2"
+caption 2 reveal red "sale:$S2" "SALE #$S2" "Sale #$S2 is revealed. The buyer re-runs it."
 wait_disputed "$S2" 240
-caption 2 "Scene 2 · Buyer disputed sale #$S2 with a bond: $(reason_name "$(sale_reason "$S2")"). The seller must disclose on-chain." "sale:$S2"
+caption 2 dispute blue "sale:$S2" "SALE #$S2" "The model is right every time. The buyer disputes and posts a bond: $(reason_name "$(sale_reason "$S2")")."
 wait_disclosed "$S2" 120
-caption 2 "Scene 2 · Disclosed. The pair is public now; the arbiter re-runs it five times." "sale:$S2"
+caption 2 dispute red "sale:$S2" "SALE #$S2" "The rogue must disclose the pair on-chain. It is public now."
 wait_state "$S2" "$ST_REFUTED" 240
-ROGUE_ADDR="$(sale_seller "$S2")"
-caption 2 "Scene 2 · Refuted: the model was right. The rogue's bond goes to the buyer, the buyer's bond comes back, and the rogue wallet reads $(headline_for "$ROGUE_ADDR")." "addr:$ROGUE_ADDR"
+caption 2 rule purple "sale:$S2" "ARBITER" "The arbiter $(runs_phrase arbiter "$S2" '^ruled:' "it"). Right every time. $(state_name "$(sale_state "$S2")")."
+caption 2 settle red "addr:$ROGUE_ADDR" "ROGUE'S CARD" "The rogue's bond goes to the buyer. Its card reads $(headline_for "$ROGUE_ADDR")." "A refutation stays on the record."
 
 # Scene 3 — garbage reveal, on the newcomer wallet
+card 3 "Scene 3 · A real pair, never delivered" "The seller commits to a real counterexample but reveals garbage."
 N0="$(sale_count)"
+NEWCOMER_ADDR="$(role_address newcomer)"; [ -n "$NEWCOMER_ADDR" ] || die "the agents' wallet table names no newcomer wallet (npm run -s wallets -- balances)"
 run_bg newcomer seller -- hunt --claim "$CLAIM_A" --max 1 --role newcomer --attack garbage --seconds 600
-caption 3 "Scene 3 · A newcomer wallet commits a real counterexample but reveals garbage ciphertext."
+caption 3 commit orange "addr:$NEWCOMER_ADDR" "NEWCOMER" "A newcomer finds a real counterexample and commits to it honestly."
 S3="$(wait_new_sale "$N0" newcomer 420)"
+[ "$(lower "$(sale_seller "$S3")")" = "$(lower "$NEWCOMER_ADDR")" ] || die "sale #$S3 was made by $(sale_seller "$S3"), not the newcomer wallet $NEWCOMER_ADDR"
 wait_revealed "$S3" 120
-caption 3 "Scene 3 · Sale #$S3 revealed. The buyer tries to decrypt it." "sale:$S3"
+caption 3 reveal orange "sale:$S3" "SALE #$S3" "But it reveals random bytes instead of the encrypted pair."
 wait_disputed "$S3" 240
-caption 3 "Scene 3 · Buyer disputed sale #$S3: $(reason_name "$(sale_reason "$S3")"). The seller discloses the real pair and its ephemeral secret." "sale:$S3"
+caption 3 dispute blue "sale:$S3" "SALE #$S3" "The buyer cannot decrypt it and disputes: $(reason_name "$(sale_reason "$S3")")."
 wait_disclosed "$S3" 120
-caption 3 "Scene 3 · Disclosed. The arbiter checks delivery before the model: does the secret reproduce the posted ciphertext?" "sale:$S3"
+caption 3 dispute orange "sale:$S3" "SALE #$S3" "The newcomer discloses the real pair, the salt, and the key it used to encrypt."
 wait_state "$S3" "$ST_REFUTED" 240
-caption 3 "Scene 3 · Refuted: the arbiter checked delivery before the model. A real pair, never delivered, earns nothing." "sale:$S3"
+caption 3 rule purple "sale:$S3" "ARBITER" "The arbiter checks delivery first: does that key reproduce the posted reveal? No. $(state_name "$(sale_state "$S3")"), without running the model." "A real counterexample that was never delivered earns nothing."
+caption 3 settle orange "addr:$NEWCOMER_ADDR" "NEWCOMER'S CARD" "The newcomer loses its bond. Its card reads $(headline_for "$NEWCOMER_ADDR")."
 
 # Scene 4 — silent buyer, sold by the quiet wallet. Its headline is read before the sale and must be "no history".
+card 4 "Scene 4 · The silent buyer" "A sale the buyer never checks."
 CLAIM_B="$(post_claim)"; [ -n "$CLAIM_B" ] || die "no CLAIM_ID from second buyer post"
-caption 4 "Scene 4 · Claim #$CLAIM_B posted. The buyer process only watches claim #$CLAIM_A; nobody will adjudicate this one." "claim:$CLAIM_B"
+caption 4 claim blue "claim:$CLAIM_B" "CLAIM #$CLAIM_B" "The buyer posts a second claim. This time nobody is watching it."
 C_SELLER_BEFORE="$(seller_confirmed "$SELLER_ADDR")"
 QUIET_ADDR="$(role_address quiet)"; [ -n "$QUIET_ADDR" ] || die "the agents' wallet table names no quiet wallet (npm run -s wallets -- balances)"
 QUIET_BEFORE="$(headline_for "$QUIET_ADDR")"
@@ -288,19 +377,24 @@ S4="$(wait_new_sale "$N0" quiet 420)"
 S4_SELLER="$(sale_seller "$S4")"
 [ "$(lower "$S4_SELLER")" = "$(lower "$QUIET_ADDR")" ] || die "sale #$S4 was made by $S4_SELLER, not the quiet wallet $QUIET_ADDR"
 wait_revealed "$S4" 120
-caption 4 "Scene 4 · Sale #$S4 revealed on claim #$CLAIM_B by the quiet wallet, whose card reads $QUIET_BEFORE. The buyer stays silent." "sale:$S4"
+caption 4 reveal grey "sale:$S4" "QUIET WALLET" "A quiet wallet with $QUIET_BEFORE sells a counterexample and reveals it."
+caption 4 adjudicate grey "sale:$S4" "SALE #$S4" "The ${ADJ_WINDOW}-second window passes. The buyer never confirms and never disputes."
 if [ "$CHAIN" = "anvil" ]; then
-  caption 4 "Scene 4 · The ${ADJ_WINDOW}s adjudication window passes (chain clock advanced) with no buyer action." "sale:$S4"
   sleep 2
   cast rpc evm_increaseTime "$((ADJ_WINDOW + 10))" --rpc-url "$RPC_URL" >/dev/null
   cast rpc evm_mine --rpc-url "$RPC_URL" >/dev/null
-else
-  caption 4 "Scene 4 · Waiting out the ${ADJ_WINDOW}s adjudication window with no buyer action." "sale:$S4"
 fi
 wait_state "$S4" "$ST_UNADJUDICATED" $((ADJ_WINDOW + 240))
 C_SELLER_AFTER="$(seller_confirmed "$SELLER_ADDR")"
 [ "$C_SELLER_AFTER" = "$C_SELLER_BEFORE" ] || die "the honest seller's confirmed count moved from $C_SELLER_BEFORE to $C_SELLER_AFTER during a sale it never made"
-BUYER_ADDR="$(claim_buyer "$CLAIM_B")"
-caption 4 "Scene 4 · Settled as unadjudicated: the quiet wallet is paid and the buyer's silent count is $(buyer_silent "$BUYER_ADDR"). The quiet wallet reads $(headline_for "$QUIET_ADDR"), with $(seller_unadjudicated "$QUIET_ADDR") unadjudicated and $(seller_confirmed "$QUIET_ADDR") confirmed. The honest seller still reads $C_SELLER_AFTER confirmed, unchanged. Silence is not evidence." "addr:$QUIET_ADDR"
-sleep 6
+caption 4 settle amber "sale:$S4" "SALE #$S4" "Anyone can settle. The quiet wallet is paid. But the sale is recorded as $(lower "$(state_name "$(sale_state "$S4")")")."
+caption 4 settle grey "addr:$QUIET_ADDR" "QUIET WALLET'S CARD" "The quiet wallet's card reads $(headline_for "$QUIET_ADDR"): $(seller_unadjudicated "$QUIET_ADDR") unadjudicated, $(seller_confirmed "$QUIET_ADDR") confirmed. Money followed the default. Reputation did not." "Silence is not evidence."
+
+# Closing card, then (with EPILOGUE=1) the live deployment named by docs/deployment.json.
+card 0 "Silence is not evidence." "Same code, live on Base Sepolia: $(dep_field address)"
+if [ "$EPILOGUE" = 1 ]; then
+  LIVE="$(live_sales_phrase || true)"
+  goto_caption "$LIVE_PAGE" "The same contract, live on Base Sepolia.${LIVE:+ $LIVE}" 10
+  goto_caption "$(dep_field explorer)/address/$(dep_field address)" "Every transaction is public." 8
+fi
 log "all four scenes done: sales #$S1 #$S2 #$S3 #$S4"

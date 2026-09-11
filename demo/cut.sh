@@ -3,8 +3,8 @@
 # record-start.json is stamped by record.mjs when the page is created, before it loads, which is when the video starts;
 # timeline.json holds one entry per caption (scenes.sh writes about twenty, and any count from one up works).
 # The cut opens half a second before the first caption: the page load and the wait for the first scene are not kept.
-# Every wait longer than GAP seconds between two captions keeps its first KEEP_HEAD s and last KEEP_TAIL s;
-# the middle is replaced by a FREEZE-second still of the last kept frame labelled "… N s pass …".
+# Every wait longer than GAP (18) seconds between two captions keeps its first KEEP_HEAD (9) s and last KEEP_TAIL (6) s;
+# the middle is replaced by a FREEZE (2.5) second still of the last kept frame labelled "… N s pass …". Prints the total.
 # Segments are cut with ffmpeg and joined with the concat demuxer. Fails if the result exceeds LIMIT seconds.
 set -euo pipefail
 
@@ -15,7 +15,7 @@ START="${START:-$OUT/record-start.json}"
 TIMELINE="${TIMELINE:-$HERE/timeline.json}"
 FINAL="${FINAL:-$OUT/bazaar-demo.mp4}"
 WORK="${WORK:-$OUT/cut}"
-GAP="${GAP:-25}"; KEEP_HEAD="${KEEP_HEAD:-10}"; KEEP_TAIL="${KEEP_TAIL:-5}"; FREEZE="${FREEZE:-2}"; LIMIT="${LIMIT:-295}"
+GAP="${GAP:-18}"; KEEP_HEAD="${KEEP_HEAD:-9}"; KEEP_TAIL="${KEEP_TAIL:-6}"; FREEZE="${FREEZE:-2.5}"; LIMIT="${LIMIT:-295}"
 FPS=30
 ENC=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -r "$FPS" -an)
 
@@ -115,9 +115,10 @@ done 3< "$WORK/plan.txt"
 ffmpeg -y -v error -f concat -safe 0 -i "$LIST" "${ENC[@]}" -movflags +faststart "$FINAL"
 FINAL_DUR="$(duration "$FINAL")"
 echo "wrote $FINAL (${FINAL_DUR}s, from ${RAW_DUR}s raw)"
-python3 - "$FINAL_DUR" "$LIMIT" <<'PY'
+python3 - "$FINAL_DUR" "$LIMIT" "$RAW_DUR" <<'PY'
 import sys
-d, lim = float(sys.argv[1]), float(sys.argv[2])
+d, lim, raw = float(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3])
+print(f"total: {d:.1f} s ({int(d // 60)}:{int(d % 60):02d}) from {raw:.1f} s raw")
 if d > lim:
     print(f"cut.sh: FINAL VIDEO IS {d:.1f}s, OVER THE {lim:.0f}s LIMIT — tighten GAP/KEEP_HEAD/KEEP_TAIL or shorten the scenes", file=sys.stderr)
     sys.exit(1)

@@ -49,9 +49,10 @@
   .act .when { color:var(--dim) }
   footer { padding:0 28px 30px; color:var(--muted); font-size:12px }
   /* ?record=1, set by app.js: the recorder's view. The thesis and the claim spec are what the captions narrate,
-     and tighter cards keep the claims and settlement columns on one screen beside the recorder's overlay. */
+     and tighter cards keep the claims and settlement columns on one screen beside the recorder's overlay. The gap
+     between cards leaves room for the recorder's callout: a 3 px outline 3 px out, and a label tag above the card. */
   .record .thesis, .record .spec { display:none }
-  .record .card { padding:6px 10px; margin-bottom:6px }
+  .record .card { padding:8px 10px; margin-bottom:14px }
   .record section { padding:10px 12px }
   .record header { padding:14px 28px 8px }
   @media (max-width: 1100px) { main { grid-template-columns:1fr } }
