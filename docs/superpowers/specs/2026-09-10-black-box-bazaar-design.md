@@ -137,9 +137,13 @@ with a flag that plants a pair the model gets right.
 Model: `claude-haiku-4-5-20251001`, temperature 0, max tokens 32.
 Prompt: `What is {a} × {b}? Reply with only the integer.` Predicate: parsed
 integer equals `a*b` computed with BigInt. Plaintext canonical form:
-`{"a":1234,"b":5678}` with no whitespace, so equal pairs hash equal.
+`{"a":123,"b":456}` with no whitespace, so equal pairs hash equal.
 
-- **Seller** samples random four-digit pairs, queries the model, and on the
+Measured 2026-09-10 before the plan was written: four-digit pairs fail 15 of
+20 at temperature 0, which makes the claim obviously false and the hunt
+trivial; three-digit pairs fail 3 of 30. The claim is therefore three-digit.
+
+- **Seller** samples random three-digit pairs, queries the model, and on the
   first pair the model gets wrong (2 of 3 runs) it commits, waits for
   inclusion, then reveals. Loop until the claim's slots are consumed.
 - **Buyer** watches `Revealed` events on its claims, decrypts, checks the
@@ -148,15 +152,16 @@ integer equals `a*b` computed with BigInt. Plaintext canonical form:
 - **Arbiter** watches `Disclosed` events, runs 5 times, rules the seller right
   if the model is wrong in at least 3.
 
-Plan step zero is empirical: measure Haiku 4.5's failure rate on four-digit
-multiplication before anything else. If it is too low for the seller to find
-hits on camera within a minute, the claim moves to five digits.
+Plan step zero, done: see the measurement above.
 
 ## 6. Delivery and encryption
 
-The buyer's claim carries an x25519 public key. The seller generates an
+The buyer's claim carries an x25519 public key, derived deterministically from
+the buyer's wallet key so no key file is needed. The seller generates an
 ephemeral keypair and posts `ephemeralPub(32) || nonce(24) || box` as the
-reveal ciphertext. Only the buyer can read the reveal. In a dispute the
+reveal ciphertext. The boxed envelope is `plaintext || salt(32)`, so the buyer
+can recompute the commitment and check it before running anything. Only the
+buyer can read the reveal. In a dispute the
 plaintext becomes public by construction; that is a feature.
 
 ## 7. Page
@@ -203,11 +208,13 @@ on camera. Production windows would be hours.
 
 1. Honest sale: claim, commit, reveal, buyer confirms, seller paid.
 2. Rogue seller: plants a pair the model gets right, buyer disputes, seller
-   discloses, arbiter re-runs and refutes, seller slashed. The arbiter is seen
+   discloses, arbiter re-runs and refutes, seller slashed. A separate rogue
+   wallet, so the honest seller's record is untouched. The arbiter is seen
    catching something before the viewer is asked to trust it.
-3. Silent buyer: a second claim whose buyer never adjudicates. After the window
-   anyone settles. The seller is paid and the page shows the sale as
-   unadjudicated and the seller's headline as unknown.
+3. Silent buyer: a second claim whose buyer never adjudicates, sold by a
+   newcomer seller wallet with no history. After the window anyone settles.
+   The seller is paid and the page shows the sale as unadjudicated and the
+   newcomer's headline as unknown.
 
 Recording: a Playwright script drives the page while the agents run in visible
 terminal panes; caption bar per scene; `ffmpeg` cut under five minutes; a
