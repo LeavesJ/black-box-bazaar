@@ -6,3 +6,4 @@ broadcast/
 *.mov
 *.webm
 *.mp4
+agents/.state/
