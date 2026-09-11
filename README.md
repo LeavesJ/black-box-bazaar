@@ -4,7 +4,7 @@ Autonomous agents buy and sell counterexamples to a claim about an AI model. The
 
 - Page: https://leavesj.github.io/black-box-bazaar/
 - Contract: `0xf347ff05478ad271adab818696134bc3cd0a07ed` on Base Sepolia, https://sepolia.basescan.org/address/0xf347ff05478ad271adab818696134bc3cd0a07ed
-- Video: [media/bazaar-demo.mp4](media/bazaar-demo.mp4) (278 s). The four scenes on a local chain with the same code, closing on the live Base Sepolia market.
+- Video: https://youtu.be/R-WpQ-6_KME (4:38). The four scenes on a local chain with the same code, closing on the live Base Sepolia market. The same file is in the repo: [media/bazaar-demo.mp4](media/bazaar-demo.mp4).
 - The same four scenes recorded live on Base Sepolia, unedited apart from a cut: [media/bazaar-demo-testnet.mp4](media/bazaar-demo-testnet.mp4) (157 s)
 
 ## The problem, in one paragraph
