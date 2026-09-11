@@ -7,7 +7,7 @@ const REASONS = ["cannot decrypt", "commit mismatch", "not reproduced"];
 const CHUNK_START = 2000n;
 const CHUNK_FLOOR = 16n;
 const ACTIVITY_ROWS = 12;
-const REFRESH_MS = 5000;
+const REFRESH_MS = new URLSearchParams(location.search).get("record") === "1" ? 1500 : 5000; // the recorder wants the badge under its caption
 // A getLogs error that names the span is the RPC's cap; anything else is transient and retried.
 const RANGE_ERROR = /range|limit|too many|exceed/i;
 const RETRIES = 3;
@@ -17,6 +17,9 @@ const $ = (id) => document.getElementById(id);
 const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+// ?record=1 is the recorder's view: the thesis and each claim's spec text are hidden and cards are tighter, so the
+// cards the captions point at fit beside the recorder's overlay. index.html carries the .record rules.
+if (new URLSearchParams(location.search).get("record") === "1") document.documentElement.classList.add("record");
 
 const dep = await (await fetch("./deployment.json", { cache: "no-store" })).json();
 const abi = await (await fetch("./abi.json", { cache: "no-store" })).json();
@@ -79,7 +82,10 @@ async function syncLogs() {
   }));
 }
 
+// On anvil (31337) the clock is whatever evm_increaseTime last made it, so an event is placed by block number
+// alone; on other chains the block's clock time is shown beside it.
 const when = (l) => {
+  if (dep.chainId === 31337) return `#${l.blockNumber}`;
   const ts = blockTime.get(l.blockNumber.toString());
   const clock = ts ? new Date(ts * 1000).toLocaleTimeString([], { hour12: false }) : "";
   return `${clock ? clock + " · " : ""}#${l.blockNumber}`;
@@ -157,11 +163,11 @@ function render(claims, sales, reps, owed, buyers, sellers) {
   for (const l of logs) if (l.eventName === "ClaimPosted") postedTx[l.args.claimId.toString()] = l.transactionHash;
 
   $("claims").innerHTML = claims.map(c => `
-    <div class="card">
+    <div class="card" data-claim="${c.id}">
       <div class="row"><b>Claim #${c.id}</b><span class="muted">${c.closed ? "closed" : "open"}${postedTx[c.id] ? ` · ${txLink(postedTx[c.id])}` : ""}</span></div>
       <div class="muted">buyer ${addrLink(c.buyer)} · bounty ${formatEther(c.bounty)} ETH × ${c.maxHits} · bought ${c.hits} · pending ${c.pending}</div>
       <div class="mono muted" style="margin-top:6px">${esc(c.modelId)}</div>
-      <div style="margin-top:6px">${esc(c.spec)}</div>
+      <div class="spec" style="margin-top:6px">${esc(c.spec)}</div>
     </div>`).join("") || `<div class="muted">No claims yet.</div>`;
 
   $("activity").innerHTML = logs.slice(-ACTIVITY_ROWS).reverse().map(row).join("") || `<li class="muted">No events yet.</li>`;
@@ -189,7 +195,7 @@ function render(claims, sales, reps, owed, buyers, sellers) {
     const h = sellerHeadline(r);
     const due = owed[a] ?? 0n;
     return `
-    <div class="card" data-addr="${a}">
+    <div class="card" data-addr="${a.toLowerCase()}">
       <div class="row">${addrLink(a)}<span class="muted">${isSeller ? "seller" : ""}${isSeller && isBuyer ? " · " : ""}${isBuyer ? "buyer" : ""}</span></div>
       ${isSeller ? `<div class="head ${h.cls}"><span class="headline">${h.text}</span>${h.beside ? `<span class="adverse">${h.beside}</span>` : ""}</div>
       <div class="triple"><div><b>${r.sellerConfirmed}</b>confirmed</div><div><b>${r.sellerRefuted}</b>refuted</div><div><b>${r.sellerUnadjudicated}</b>unadjudicated</div></div>

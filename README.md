@@ -94,7 +94,24 @@ Deploy with `./scripts/deploy-testnet.sh`. It checks the deployer holds Base Sep
 
 The buyer wallet posts both claims and adjudicates only the first. The arbiter wallet rules. The sweep runs on the deployer wallet. Captions read every count from `rep(address)`.
 
-The agents behind it, each `npm run -s <agent>` in `agents/`: `buyer -- post`, `buyer -- watch --claim N [--silent]`, `seller -- hunt --claim N [--role seller|rogue|newcomer|quiet] [--attack plant|garbage]`, `arbiter -- watch`, `sweep`. Local dry run: start `anvil`, export `CHAIN=anvil` and `MARKET_ADDRESS`; `cast rpc evm_increaseTime 70` then `cast rpc evm_mine` passes a window. To record: `cd demo && npm install`, run `node record.mjs`, then `./demo/scenes.sh` beside it, then `./demo/cut.sh`.
+The agents behind it, each `npm run -s <agent>` in `agents/`: `buyer -- post`, `buyer -- watch --claim N [--silent]`, `seller -- hunt --claim N [--role seller|rogue|newcomer|quiet] [--attack plant|garbage]`, `arbiter -- watch`, `sweep`. Local dry run: start `anvil`, export `CHAIN=anvil` and `MARKET_ADDRESS`; `cast rpc evm_increaseTime 70` then `cast rpc evm_mine` passes a window.
+
+To record the demo, the chain must be fresh: the captions narrate an empty market, so `scenes.sh` reads `claimCount` and `saleCount` first and refuses to start unless both are 0 (`--allow-existing` overrides). Start a fresh chain, or point `.env` at the testnet, then deploy, export the ABI, serve `docs/` locally, and run the recorder, the scenes and the cut:
+
+```
+anvil --block-time 1                                    # fresh chain; or CHAIN=base-sepolia in .env
+ARBITER_ADDRESS=0x… REVEAL_WINDOW=60 ADJUDICATION_WINDOW=60 DISCLOSURE_WINDOW=60 ARBITRATION_WINDOW=60 \
+  forge script script/Deploy.s.sol --rpc-url http://127.0.0.1:8545 --private-key $DEPLOYER_KEY --broadcast
+./scripts/export-abi.sh <address> <chainId> <deployedBlock>   # or ./scripts/deploy-testnet.sh for both steps on Base Sepolia
+(cd docs && python3 -m http.server 8080)                # serve the page locally
+(cd demo && npm install)                                # once, for playwright
+export MARKET_ADDRESS=<address> CHAIN=anvil             # a shell export wins over .env
+node demo/record.mjs http://localhost:8080/?record=1    # terminal 1: records until the scenes end
+./demo/scenes.sh                                        # terminal 2: the four scenes
+./demo/cut.sh                                           # after both finish: demo/out/bazaar-demo.mp4
+```
+
+`record.mjs` takes the page URL as its one argument; `?record=1` hides the thesis and claim spec text so the cards the captions point at fit beside the overlay. On anvil the page shows block numbers for event times, since `scenes.sh` advances the chain clock to pass the adjudication window.
 
 ## Where the ideas came from
 

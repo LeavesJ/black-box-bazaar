@@ -2,6 +2,7 @@
 # demo/cut.sh — demo/out/raw.webm + demo/out/record-start.json + demo/timeline.json -> demo/out/bazaar-demo.mp4
 # record-start.json is stamped by record.mjs when the page is created, before it loads, which is when the video starts;
 # timeline.json holds one entry per caption (scenes.sh writes about twenty, and any count from one up works).
+# The cut opens half a second before the first caption: the page load and the wait for the first scene are not kept.
 # Every wait longer than GAP seconds between two captions keeps its first KEEP_HEAD s and last KEEP_TAIL s;
 # the middle is replaced by a FREEZE-second still of the last kept frame labelled "… N s pass …".
 # Segments are cut with ffmpeg and joined with the concat demuxer. Fails if the result exceeds LIMIT seconds.
@@ -59,8 +60,12 @@ python3 - "$START" "$TIMELINE" "$RAW_DUR" "$GAP" "$KEEP_HEAD" "$KEEP_TAIL" > "$W
 import json, sys
 start, timeline, dur, gap, head, tail = sys.argv[1], sys.argv[2], float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6])
 t0 = json.load(open(start))["t"]
-marks = sorted({min(max(0.0, float(e["t"]) - t0), dur) for e in json.load(open(timeline))})
-marks = [0.0] + [m for m in marks if 0.0 < m < dur] + [dur]
+caps = sorted({min(max(0.0, float(e["t"]) - t0), dur) for e in json.load(open(timeline))})
+# The first kept segment starts one second before the first caption, never at 0, so the cut opens on it.
+lead = max(0.0, caps[0] - 0.5)
+if lead >= dur:
+    sys.exit(f"cut.sh: the first caption ({caps[0]:.1f}s) is at or past the end of the recording ({dur:.1f}s)")
+marks = [lead] + [m for m in caps if lead < m < dur] + [dur]
 segs = []
 def cut(a, b):
     if b - a < 0.05: return
