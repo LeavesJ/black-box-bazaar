@@ -230,7 +230,7 @@ wait_for() {
   local id="$1" limit="$2" what="$3" start=$SECONDS; shift 3
   until "$@"; do
     [ $((SECONDS - start)) -ge "$limit" ] && die "sale #$id: $what not reached in ${limit}s; $(sale_status "$id")"
-    sleep 2
+    sleep 1
   done
 }
 is_state() { [ "$(sale_state "$1")" = "$2" ]; }
@@ -250,7 +250,7 @@ wait_new_sale() {
     n="$(sale_count)"
     [ "$n" -gt "$before" ] && break
     [ $((SECONDS - start)) -ge "$limit" ] && die "$role made no sale within ${limit}s; saleCount still $n, last log line: $(tail -1 "$LOGS/$role.log" 2>/dev/null || echo none)"
-    sleep 2
+    sleep 1
   done
   id="$(python3 - "$LOGS/$role.log" "$before" <<'PY'
 import json, sys
@@ -305,15 +305,18 @@ except FileNotFoundError:
 print(found)
 PY
 }
-# wait_log <role> <saleId> <event-regex> <field> <seconds>: waits up to <seconds> for that log line. A line that
-# reports a transaction lands once its receipt is in, a moment after the chain state a wait keyed on; the arbiter's
-# "ruled: …" is one. Never fails: the caller falls back to a count read from the agents' source.
-wait_log() {
-  local start=$SECONDS
-  until [ -n "$(log_field "$1" "$2" "$3" "$4")" ]; do
-    [ $((SECONDS - start)) -ge "$5" ] && return 0
-    sleep 0.5
-  done
+# tally_phrase <role> <saleId> <event-regex> <fails|right>: what that log line's wrong, malformed and runs counts say,
+# in words. fails: "It fails every time." or "It fails W of N times."; right: "The model is right every time." or
+# "The model is wrong only W of N times.". Empty when the line or its counts are missing, so a caption never states
+# an outcome nobody logged. The buyer's "re-run result" and the arbiter's "ruling" are logged before their transaction.
+tally_phrase() {
+  local w m n
+  w="$(log_field "$1" "$2" "$3" wrong)"; m="$(log_field "$1" "$2" "$3" malformed)"; n="$(log_field "$1" "$2" "$3" runs)"
+  [ -n "$w" ] && [ -n "$n" ] || return 0
+  case "$4" in
+    fails) if [ "$w" = "$n" ]; then echo "It fails every time."; else echo "It fails $(word "$w") of $(word "$n") times."; fi ;;
+    right) if [ "$w" = 0 ] && [ "${m:-0}" = 0 ]; then echo "The model is right every time."; else echo "The model is wrong only $(word "$w") of $(word "$n") times."; fi ;;
+  esac
 }
 # config_const <NAME>: an integer constant from agents/src/config.ts, so a caption never carries a typed count.
 config_const() { grep -oE "^export const $1 = [0-9]+;" "$AGENTS/src/config.ts" | grep -oE '[0-9]+' | tail -1; }
@@ -362,7 +365,7 @@ log "market $MARKET_ADDRESS on $CHAIN via $RPC_URL · $C0 claims, $S0 sales · a
 
 run_bg arbiter arbiter -- watch --seconds 900
 run_bg sweep sweep -- --seconds 900
-card 0 "Black Box Bazaar" "A market where agents sell counterexamples the buyer cannot see until it has paid."
+card 0 "Black Box Bazaar" "A market where agents sell counterexamples the buyer cannot see until its money is in escrow."
 caption 0 "" grey "" "" "The market is $( [ "$C0" = 0 ] && [ "$S0" = 0 ] && echo empty || echo "not empty: $(onchain_phrase "$C0" "$S0")" ). The arbiter is watching. The sweep runs on the deployer wallet." "Every count on screen is read from the chain as it happens."
 
 # Scene 1 — honest sale, on the seller wallet. The claim is posted before the card, so the card lifts onto its caption.
@@ -381,7 +384,7 @@ caption 1 commit green "sale:$S1" "SELLER" "The seller asks the model random pai
 wait_revealed "$S1" 120
 caption 1 reveal green "sale:$S1" "SALE #$S1" "The seller reveals the pair, encrypted to the buyer's key. Only the buyer can read it."
 wait_state "$S1" "$ST_CONFIRMED" 240
-caption 1 adjudicate blue "sale:$S1" "SALE #$S1" "The buyer decrypts it, checks the hash, and $(runs_phrase buyer "$S1" '^re-run result$' "the model"). It fails every time. Confirmed."
+caption 1 adjudicate blue "sale:$S1" "SALE #$S1" "The buyer decrypts it, checks the hash, and $(runs_phrase buyer "$S1" '^re-run result$' "the model"). $(tally_phrase buyer "$S1" '^re-run result$' fails) Confirmed."
 caption 1 settle green "addr:$SELLER_ADDR" "SELLER'S CARD" "The seller is paid and its bond comes back. Its card reads $(headline_for "$SELLER_ADDR")." "Confirmed means the buyer checked. That is the only way this number moves."
 scene_done 1
 
@@ -398,12 +401,11 @@ caption 2 commit red "sale:$S2" "ROGUE" "The rogue picks a pair the model answer
 wait_revealed "$S2" 120
 caption 2 reveal red "sale:$S2" "SALE #$S2" "Sale #$S2 is revealed. The buyer re-runs it."
 wait_disputed "$S2" 240
-caption 2 dispute blue "sale:$S2" "SALE #$S2" "The model is right every time. The buyer disputes and posts a bond: $(reason_name "$(sale_reason "$S2")")."
+caption 2 dispute blue "sale:$S2" "SALE #$S2" "$(tally_phrase buyer "$S2" '^re-run result$' right) The buyer disputes and posts a bond: $(reason_name "$(sale_reason "$S2")")."
 wait_disclosed "$S2" 120
 caption 2 dispute red "sale:$S2" "SALE #$S2" "The rogue must disclose the pair on-chain. It is public now."
 wait_state "$S2" "$ST_REFUTED" 240
-wait_log arbiter "$S2" '^ruled:' runs 8
-caption 2 rule purple "sale:$S2" "ARBITER" "The arbiter $(runs_phrase arbiter "$S2" '^ruled:' "it" "$(config_const ARBITER_RUNS)"). Right every time. $(state_name "$(sale_state "$S2")")."
+caption 2 rule purple "sale:$S2" "ARBITER" "The arbiter $(runs_phrase arbiter "$S2" '^ruling$' "it" "$(config_const ARBITER_RUNS)"). $(tally_phrase arbiter "$S2" '^ruling$' right) $(state_name "$(sale_state "$S2")")."
 caption 2 settle red "addr:$ROGUE_ADDR" "ROGUE'S CARD" "The rogue's bond goes to the buyer. Its card reads $(headline_for "$ROGUE_ADDR")." "A refutation stays on the record."
 scene_done 2
 

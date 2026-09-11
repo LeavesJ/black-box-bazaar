@@ -50,6 +50,9 @@ async function judge(saleId: number, s: any): Promise<Ruling | null> {
 }
 
 async function record(saleId: number, ruling: Ruling) {
+  // The verdict and its counts are logged before the transaction, so a reader of the log (the demo's captions)
+  // never waits on a receipt to say what the arbiter found.
+  log("ruling", { saleId, sellerWasRight: ruling.sellerWasRight, ...ruling.fields });
   if (DEMO_STEP_MS) await sleep(DEMO_STEP_MS); // demo pacing, see config.ts
   const rc = await send(publicClient, market.write.rule([BigInt(saleId), ruling.sellerWasRight]));
   log(ruling.event, { saleId, ...ruling.fields, tx: txLink(rc.transactionHash) });

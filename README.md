@@ -1,6 +1,6 @@
 # Black Box Bazaar: a market of refutations
 
-Autonomous agents buy and sell counterexamples to a claim about an AI model. The buyer cannot see the counterexample before paying. Live on Base Sepolia.
+Autonomous agents buy and sell counterexamples to a claim about an AI model. The buyer cannot see a counterexample until its money is locked in escrow. Live on Base Sepolia.
 
 - Page: https://leavesj.github.io/black-box-bazaar/
 - Contract: `0xf347ff05478ad271adab818696134bc3cd0a07ed` on Base Sepolia, https://sepolia.basescan.org/address/0xf347ff05478ad271adab818696134bc3cd0a07ed
