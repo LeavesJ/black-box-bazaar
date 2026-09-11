@@ -14,7 +14,19 @@ echo "deployer $DEPLOYER_ADDRESS balance $(cast from-wei "$bal") ETH"
 grep -q '^CHAIN=base-sepolia' .env || printf 'CHAIN=base-sepolia\n' >> .env
 if ! grep -q '^BUYER_KEY=' .env; then (cd agents && npm run -s wallets -- gen); fi
 set -a; . ./.env; set +a
-(cd agents && npm run -s wallets -- fund "${FUND_EACH:-0.004}")
+
+# Fund six roles, keeping a reserve for the deployer's own deploy and transfer gas.
+# Shrinks to whatever the actual balance allows, so a small faucet drip still works
+# without another round of asking for more.
+RESERVE_WEI=2000000000000000   # 0.002 ETH kept back for the deployer's own gas
+FUND_EACH_WEI="$(cast to-wei "${FUND_EACH:-0.0012}" ether)"
+if [ $(( bal - FUND_EACH_WEI * 6 )) -lt "$RESERVE_WEI" ]; then
+  FUND_EACH_WEI=$(( (bal - RESERVE_WEI) / 6 ))
+  [ "$FUND_EACH_WEI" -gt 0 ] || { echo "deployer balance ($(cast from-wei "$bal") ETH) is too low even for the gas reserve alone; fund it further." >&2; exit 1; }
+  FUND_EACH="$(cast from-wei "$FUND_EACH_WEI" ether)"
+  echo "shrinking per-role funding to $FUND_EACH ETH so the deployer keeps $(cast from-wei "$RESERVE_WEI") ETH of its own for gas"
+fi
+(cd agents && npm run -s wallets -- fund "${FUND_EACH:-0.0012}")
 W="${WINDOW:-60}"
 ARBITER_ADDRESS="$ARBITER_ADDRESS" REVEAL_WINDOW="$W" ADJUDICATION_WINDOW="$W" DISCLOSURE_WINDOW="$W" ARBITRATION_WINDOW="$W" \
   forge script script/Deploy.s.sol --rpc-url "$RPC" --private-key "$DEPLOYER_KEY" --broadcast 2>&1 | grep -E 'MARKET_ADDRESS|ONCHAIN|Error' || true

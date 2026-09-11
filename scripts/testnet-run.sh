@@ -12,6 +12,10 @@ RPC=https://sepolia.base.org
 EXPLORER=https://sepolia.basescan.org
 PAGE=https://leavesj.github.io/black-box-bazaar/
 set -a; . ./.env; set +a
+# A small bounty keeps the whole demo inside one faucet drip. The buyer escrows
+# bounty x maxHits per claim; every bond is 20% of the bounty. Shell env wins over
+# .env, so this reaches every agent scenes.sh starts.
+export BOUNTY_ETH="${BOUNTY_ETH:-0.0001}"
 
 step() { printf '\n== %s\n' "$*"; }
 
